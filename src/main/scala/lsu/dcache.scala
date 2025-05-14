@@ -35,7 +35,7 @@ class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1Hella
   })
 
   val req = Reg(new WritebackReq(edge.bundle))
-  val s_invalid :: s_fill_buffer :: s_lsu_release :: s_active :: s_grant :: Nil = Enum(5)
+  val s_invalid :: s_fill_buffer :: s_lsu_release :: s_active :: s_grant :: s_release :: Nil = Enum(6)//add release state
   val state = RegInit(s_invalid)
   val r1_data_req_fired = RegInit(false.B)
   val r2_data_req_fired = RegInit(false.B)
@@ -76,12 +76,18 @@ class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1Hella
                           shrinkPermissions = req.param,
                           data = wb_buffer(data_req_cnt))._2
 
+  val voluntaryReleaseNoData = edge.Release( //this overloads to a Release instead of a ReleaseData (yay scala)
+                          fromSource = id.U,
+                          toAddress = r_address,
+                          lgSize = lgCacheBlockBytes.U,
+                          shrinkPermissions = req.param)._2
+
 
   when (state === s_invalid) {
     io.req.ready := true.B
     when (io.req.fire) {
-      state := s_fill_buffer
-      data_req_cnt := 0.U
+      state := Mux(io.req.bits.has_data, s_fill_buffer, s_release) //mux in a fill bypass for non-data acks.
+      data_req_cnt := Mux(io.req.bits.has_data, 0.U, (refillCycles-1).U) //if no data, play for 1 beat only
       req := io.req.bits
       acked := false.B
     }
@@ -115,13 +121,14 @@ class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1Hella
     }
   } .elsewhen (state === s_lsu_release) {
     io.lsu_release.valid := true.B
-    io.lsu_release.bits := probeResponse
+    io.lsu_release.bits := probeResponse//because we only care about the addr, don't bother muxing message types.
     when (io.lsu_release.fire) {
      state := s_active
     }
   } .elsewhen (state === s_active) {
     io.release.valid := data_req_cnt < refillCycles.U
-    io.release.bits := Mux(req.voluntary, voluntaryRelease, probeResponse)
+    io.release.bits := Mux(req.voluntary, Mux(req.has_data, voluntaryRelease, voluntaryReleaseNoData), probeResponse) //if it has no data...
+    io.resp := Mux(req.has_data && req.voluntary, false.B, true.B)
 
     when (io.mem_grant) {
       acked := true.B
@@ -138,6 +145,13 @@ class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1Hella
     }
     when (acked) {
       state := s_invalid
+    }
+  } .elsewhen (state === s_release) {
+    io.lsu_release.valid := true.B
+    io.lsu_release.bits := probeResponse
+    when (io.lsu_release.fire) {
+     state := s_active
+     io.resp := true.B //respond to releases when they are allowed to play!
     }
   }
 }
@@ -196,6 +210,7 @@ class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
   io.meta_write.bits.tag := req_tag
   io.meta_write.bits.data.tag := req_tag
   io.meta_write.bits.data.coh := new_coh
+  io.meta_write.bits.data.stale := new_coh === 0.U // if probed to invalid, mark as stale.
 
   io.wb_req.valid := state === s_writeback_req
   io.wb_req.bits.source := req.source
@@ -204,6 +219,7 @@ class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
   io.wb_req.bits.param := report_param
   io.wb_req.bits.way_en := way_en
   io.wb_req.bits.voluntary := false.B
+  io.wb_req.bits.has_data := true.B
 
 
   io.mshr_wb_rdy := !state.isOneOf(s_release, s_writeback_req, s_writeback_resp, s_meta_write, s_meta_write_resp)
@@ -426,7 +442,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 
   def widthMap[T <: Data](f: Int => T) = VecInit((0 until memWidth).map(f))
 
-  val t_replay :: t_probe :: t_wb :: t_mshr_meta_read :: t_lsu :: t_prefetch :: Nil = Enum(6)
+  val t_replay :: t_probe :: t_wb :: t_mshr_meta_read :: t_lsu :: t_prefetch :: Nil = Enum(6) //only update on lsu interaction
 
   val wb = Module(new BoomWritebackUnit)
   val prober = Module(new BoomProbeUnit)
@@ -438,7 +454,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   mshrs.io.rob_head_idx := io.lsu.rob_head_idx
 
   // tags
-  def onReset = L1Metadata(0.U, ClientMetadata.onReset)
+  def onReset = L1Metadata(0.U, ClientMetadata.onReset, false.B)
   val meta = Seq.fill(memWidth) { Module(new L1MetadataArray(onReset _)) }
   val metaWriteArb = Module(new Arbiter(new L1MetaWriteReq, 2))
   // 0 goes to MSHR refills, 1 goes to prober
@@ -713,9 +729,18 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   val s2_word_idx   = widthMap(w => if (rowWords == 1) 0.U else s2_req(w).addr(log2Up(rowWords*wordBytes)-1, log2Up(wordBytes)))
 
   // replacement policy
-  val replacer = cacheParams.replacement
-  val s1_replaced_way_en = UIntToOH(replacer.way)
-  val s2_replaced_way_en = UIntToOH(RegNext(replacer.way))
+  val replacer = new SeqPLRU(cacheParams.nSets, cacheParams.nWays)
+  //val s1_replaced_way_en = UIntToOH(replacer.way) we need to access in s1, read out in s2!
+  //when(s1_valid(0)){ //this has a 1cycle delay.
+  replacer.access(s1_req(0).addr(untagBits-1,blockOffBits)) //I hate this addressing. Sets up replacement set as read address
+  val s2_replaced_way_en = UIntToOH(replacer.way) //get victim for set in s2
+  dontTouch(s2_replaced_way_en) //help me debug ;w;
+  val dbg_target_set = s1_req(0).addr(untagBits-1,blockOffBits)//debug signal
+  dontTouch(dbg_target_set) // :)
+  val dbg_plru_state = replacer.debug_state 
+  dontTouch(dbg_plru_state)
+
+
   val s2_repl_meta = widthMap(i => Mux1H(s2_replaced_way_en, wayMap((w: Int) => RegNext(meta(i).io.resp(w))).toSeq))
 
   // nack because of incoming probe
@@ -735,6 +760,15 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   val s2_send_nack = widthMap(w => (RegNext(s1_send_resp_or_nack(w)) && s2_nack(w)))
   for (w <- 0 until memWidth)
     assert(!(s2_send_resp(w) && s2_send_nack(w)))
+
+  when (s2_hit(0) && s2_valid(0) && s2_type === t_lsu){ //{//on a completed cache hit from LSU
+    replacer.update(valid=true.B, hit=true.B, set=s2_req(0).addr(untagBits-1,blockOffBits), hit_way=OHToUInt(s2_tag_match_way(0)(log2Ceil(cacheParams.nWays)-1, 0)))//we hit! (force width)
+  }.elsewhen (!s2_hit(0) && s2_valid(0) && s2_type === t_lsu){ //on a completed cache miss from LSU
+    replacer.update(valid=true.B, hit=false.B, set=s2_req(0).addr(untagBits-1,blockOffBits), hit_way=OHToUInt(s2_tag_match_way(0)(log2Ceil(cacheParams.nWays)-1, 0)))//we miss!
+  }.otherwise{
+    replacer.update(valid=false.B, hit=false.B, set=s2_req(0).addr(untagBits-1,blockOffBits), hit_way=OHToUInt(s2_tag_match_way(0)(log2Ceil(cacheParams.nWays)-1, 0)))//I should be able to init like this right?
+  } //maybe this needs to be later? I am not sure.
+  //consider:: are replays treated differently? or should we only update upon completion? that seems harder LOL
 
   // hits always send a response
   // If MSHR is not available, LSU has to replay this request later
@@ -761,7 +795,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     mshrs.io.req(w).bits.uop.br_mask := GetNewBrMask(io.lsu.brupdate, s2_req(w).uop)
     mshrs.io.req(w).bits.addr        := s2_req(w).addr
     mshrs.io.req(w).bits.tag_match   := s2_tag_match(w)
-    mshrs.io.req(w).bits.old_meta    := Mux(s2_tag_match(w), L1Metadata(s2_repl_meta(w).tag, s2_hit_state(w)), s2_repl_meta(w))
+    mshrs.io.req(w).bits.old_meta    := Mux(s2_tag_match(w), L1Metadata(s2_repl_meta(w).tag, s2_hit_state(w), s2_repl_meta(w).stale), s2_repl_meta(w))
     mshrs.io.req(w).bits.way_en      := Mux(s2_tag_match(w), s2_tag_match_way(w), s2_replaced_way_en)
 
     mshrs.io.req(w).bits.data        := s2_req(w).data
@@ -771,7 +805,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 
   mshrs.io.meta_resp.valid      := !s2_nack_hit(0) || prober.io.mshr_wb_rdy
   mshrs.io.meta_resp.bits       := Mux1H(s2_tag_match_way(0), RegNext(meta(0).io.resp))
-  when (mshrs.io.req.map(_.fire).reduce(_||_)) { replacer.miss }
+  //when (mshrs.io.req.map(_.fire).reduce(_||_)) { replacer.miss } //enhhh maybe we want to rework stuff? idk
   tl_out.a <> mshrs.io.mem_acquire
 
   // probes and releases
@@ -864,6 +898,8 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
                             !IsKilledByBranch(io.lsu.brupdate, s2_req(w).uop)
     io.lsu.nack(w).bits  := UpdateBrMask(io.lsu.brupdate, s2_req(w))
     assert(!(io.lsu.nack(w).valid && s2_type =/= t_lsu))
+
+    // throw the plru update on hit here??
   }
 
   // Store/amo hits

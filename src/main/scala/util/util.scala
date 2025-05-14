@@ -199,7 +199,9 @@ object WrapInc
 {
   // "n" is the number of increments, so we wrap at n-1.
   def apply(value: UInt, n: Int): UInt = {
-    if (isPow2(n)) {
+    if (n == 1) { //add corner case for 1 mshr
+      value
+    } else if (isPow2(n)) {
       (value + 1.U)(log2Ceil(n)-1,0)
     } else {
       val wrap = (value === (n-1).U)
@@ -350,7 +352,10 @@ object AgePriorityEncoder
     val n_padded = 1 << width
     val temp_vec = (0 until n_padded).map(i => if (i < n) in(i) && i.U >= head else false.B) ++ in
     val idx = PriorityEncoder(temp_vec)
-    idx(width-1, 0) //discard msb
+    if (width > 0) //add corner case for 1mshr
+      idx(width-1, 0) //discard msb
+    else 
+      idx
   }
 }
 

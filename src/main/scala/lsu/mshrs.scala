@@ -140,6 +140,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
   val commit_line = Reg(Bool())
   val grant_had_data = Reg(Bool())
   val finish_to_prefetch = Reg(Bool())
+  val wb_has_data = RegInit(false.B)
 
   // Block probes if a tag write we started is still in the pipeline
   val meta_hazard = RegInit(0.U(2.W))
@@ -194,7 +195,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     assert(rpq.io.enq.ready)
     req := io.req
     val old_coh   = io.req.old_meta.coh
-    req_needs_wb := old_coh.onCacheControl(M_FLUSH)._1 // does the line we are evicting need to be written back
+    req_needs_wb := ((io.req.old_meta.coh.state =/= 0.U) || (io.req.old_meta.stale && io.req.old_meta.coh.state === 0.U)) && !io.req.tag_match //old_coh.onCacheControl(M_FLUSH)._1 // does the line we are evicting need to be written back
     when (io.req.tag_match) {
       val (is_hit, _, coh_on_hit) = old_coh.onAccess(io.req.uop.mem_cmd)
       when (is_hit) { // set dirty bit
@@ -290,7 +291,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
       // The prefetcher should consider fetching the next line
       io.commit_val := true.B
       state := s_meta_read
-    }
+    } 
   } .elsewhen (state === s_meta_read) {
     io.meta_read.valid := !io.prober_state.valid || !grantack.valid || (io.prober_state.bits(untagBits-1,blockOffBits) =/= req_idx)
     io.meta_read.bits.idx := req_idx
@@ -301,8 +302,10 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     }
   } .elsewhen (state === s_meta_resp_1) {
     state := s_meta_resp_2
-  } .elsewhen (state === s_meta_resp_2) {
-    val needs_wb = io.meta_resp.bits.coh.onCacheControl(M_FLUSH)._1
+  } .elsewhen (state === s_meta_resp_2) { //io.meta_resp.bits.coh.onCacheControl(M_FLUSH)._1 (for line below xd) modified the Metadata.scala file to change silent eviction policy... surely this breaks nothing right :)
+    val needs_wb = io.meta_resp.bits.coh.onCacheControl(M_FLUSH)._1 || (io.meta_resp.bits.stale && io.meta_resp.bits.coh.state === 0.U && !io.req.tag_match)// overwrite this to wb if not invalid or if stale, if we don't match tag (updating invalid way)
+    dontTouch(needs_wb)
+    wb_has_data := (io.meta_resp.bits.coh.onCacheControl(M_FLUSH)._1 && io.meta_resp.bits.coh.state === 3.U)//only on dirty evict do we notify
     state := Mux(!io.meta_resp.valid, s_meta_read, // Prober could have nack'd this read
              Mux(needs_wb, s_meta_clear, s_commit_line))
   } .elsewhen (state === s_meta_clear) {
@@ -310,6 +313,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     io.meta_write.bits.idx      := req_idx
     io.meta_write.bits.data.coh := coh_on_clear
     io.meta_write.bits.data.tag := req_tag
+    io.meta_write.bits.data.stale := false.B //if we are triggering a wb, data can't be stale anymore.
     io.meta_write.bits.way_en   := req.way_en
 
     when (io.meta_write.fire) {
@@ -324,6 +328,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     io.wb_req.bits.way_en    := req.way_en
     io.wb_req.bits.source    := io.id
     io.wb_req.bits.voluntary := true.B
+    io.wb_req.bits.has_data  := wb_has_data
     when (io.wb_req.fire) {
       state := s_wb_resp
     }
@@ -365,6 +370,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     io.meta_write.bits.idx      := req_idx
     io.meta_write.bits.data.coh := new_coh
     io.meta_write.bits.data.tag := req_tag
+    io.meta_write.bits.data.stale := false.B //this is an aquire getting issued!
     io.meta_write.bits.way_en   := req.way_en
     when (io.meta_write.fire) {
       state := s_mem_finish_1
