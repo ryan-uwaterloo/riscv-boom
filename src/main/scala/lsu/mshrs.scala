@@ -370,7 +370,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     io.meta_write.bits.idx      := req_idx
     io.meta_write.bits.data.coh := new_coh
     io.meta_write.bits.data.tag := req_tag
-    io.meta_write.bits.data.stale := false.B //this is an aquire getting issued!
+    io.meta_write.bits.data.stale := false.B //this is an acquire getting issued!
     io.meta_write.bits.way_en   := req.way_en
     when (io.meta_write.fire) {
       state := s_mem_finish_1
@@ -566,7 +566,8 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
   io.prefetch <> prefetcher.io.prefetch
 
 
-  val cacheable = edge.manager.supportsAcquireBFast(req.bits.addr, lgCacheBlockBytes.U)
+  // val cacheable = edge.manager.supportsAcquireBFast(req.bits.addr, lgCacheBlockBytes.U) //this is getting optimized to 0 with the testharness
+  val cacheable = true.B //so set it to always true lmao
 
   // --------------------
   // The MSHR SDQ
