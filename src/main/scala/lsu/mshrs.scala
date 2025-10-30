@@ -91,6 +91,8 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     val wb_resp     = Input(Bool())
 
     val probe_rdy   = Output(Bool())
+
+    val clear_mshr  = Decoupled(UInt(coreMaxAddrBits.W))
   })
 
   // TODO: Optimize this. We don't want to mess with cache during speculation
@@ -180,6 +182,8 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
   io.lb_read.valid       := false.B
   io.lb_read.bits        := DontCare
   io.mem_grant.ready     := false.B
+  io.clear_mshr.bits     := req.addr
+  io.clear_mshr.valid    := false.B
 
   when (io.req_sec_val && io.req_sec_rdy) {
     req.uop.mem_cmd := dirtier_cmd
@@ -384,7 +388,10 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
       state := s_mem_finish_2
     }
   } .elsewhen (state === s_mem_finish_2) {
-    state := Mux(finish_to_prefetch, s_prefetch, s_invalid)
+    io.clear_mshr.valid := true.B 
+    when(io.clear_mshr.fire){
+      state := Mux(finish_to_prefetch, s_prefetch, s_invalid)
+    }
   } .elsewhen (state === s_prefetch) {
     io.req_pri_rdy := true.B
     when ((io.req_sec_val && !io.req_sec_rdy) || io.clear_prefetch) {
@@ -551,6 +558,8 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
 
     val fence_rdy = Output(Bool())
     val probe_rdy = Output(Bool())
+
+    val clear_mshr = Valid(UInt(coreMaxAddrBits.W))
   })
 
   val req_idx = OHToUInt(io.req.map(_.valid))
@@ -621,6 +630,7 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
   val replay_arb     = Module(new Arbiter(new BoomDCacheReqInternal    , cfg.nMSHRs))
   val resp_arb       = Module(new Arbiter(new BoomDCacheResp           , cfg.nMSHRs + nIOMSHRs))
   val refill_arb     = Module(new Arbiter(new L1DataWriteReq           , cfg.nMSHRs))
+  val clear_arb      = Module(new Arbiter(UInt(coreMaxAddrBits.W)      , cfg.nMSHRs))
 
   val commit_vals    = Wire(Vec(cfg.nMSHRs, Bool()))
   val commit_addrs   = Wire(Vec(cfg.nMSHRs, UInt(coreMaxAddrBits.W)))
@@ -678,6 +688,7 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
     wb_req_arb.io.in(i)     <> mshr.io.wb_req
     replay_arb.io.in(i)     <> mshr.io.replay
     refill_arb.io.in(i)     <> mshr.io.refill
+    clear_arb.io.in(i)      <> mshr.io.clear_mshr
 
     lb_read_arb.io.in(i)       <> mshr.io.lb_read
     mshr.io.lb_resp            := lb_read_data
@@ -766,6 +777,10 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
     io.block_hit(w)      := idx_match(w) && tag_match(w)
   }
   io.refill         <> refill_arb.io.out
+
+  io.clear_mshr.bits     <> clear_arb.io.out.bits
+  io.clear_mshr.valid    <> clear_arb.io.out.valid 
+  clear_arb.io.out.ready := true.B
 
   val free_sdq = io.replay.fire && isWrite(io.replay.bits.uop.mem_cmd)
 

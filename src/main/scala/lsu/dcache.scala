@@ -92,7 +92,7 @@ class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1Hella
       acked := false.B
     }
   } .elsewhen (state === s_fill_buffer) {
-    io.meta_read.valid := data_req_cnt < refillCycles.U
+    io.meta_read.valid := data_req_cnt < refillCycles.U //in a pro gamer uncommented move, the wb unit needs to read the metadata array to provide the correct address to the cache for its uop tracking LMFAO
     io.meta_read.bits.idx := req.idx
     io.meta_read.bits.tag := req.tag
 
@@ -156,6 +156,12 @@ class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1Hella
   }
 }
 
+class ProbeStatusBundle(nMSHRs: Int)(implicit p: Parameters) extends BoomBundle()(p) {
+  val valid = Bool()
+  val age = UInt(log2Ceil(nMSHRs+1).W)
+  val blocked = Bool()
+}
+
 class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCacheModule()(p) {
   val io = IO(new Bundle {
     val req = Flipped(Decoupled(new TLBundleB(edge.bundle)))
@@ -171,6 +177,9 @@ class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
     val lsu_release = Decoupled(new TLBundleC(edge.bundle))
 
     val state = Output(Valid(UInt(coreMaxAddrBits.W)))
+
+    val idx = Input(UInt(log2Ceil(cfg.nMSHRs+1).W)) //what probe are we servicing rn?
+    val probe_commit = Valid(UInt(log2Ceil(cfg.nMSHRs+1).W)) //what probe have we just completed?
   })
 
   val (s_invalid :: s_meta_read :: s_meta_resp :: s_mshr_req ::
@@ -181,6 +190,8 @@ class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
   val req = Reg(new TLBundleB(edge.bundle))
   val req_idx = req.address(idxMSB, idxLSB)
   val req_tag = req.address >> untagBits
+
+  val current_idx = Reg(UInt(log2Ceil(cfg.nMSHRs+1).W))
 
   val way_en = Reg(UInt())
   val tag_matches = way_en.orR
@@ -227,11 +238,15 @@ class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
   io.lsu_release.valid := state === s_lsu_release
   io.lsu_release.bits  := edge.ProbeAck(req, report_param)
 
+  io.probe_commit.valid := false.B 
+  io.probe_commit.bits  := DontCare
+
   // state === s_invalid
   when (state === s_invalid) {
     when (io.req.fire) {
       state := s_meta_read
       req := io.req.bits
+      current_idx := io.idx
     }
   } .elsewhen (state === s_meta_read) {
     when (io.meta_read.fire) {
@@ -244,8 +259,10 @@ class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
     old_coh := io.block_state
     way_en := io.way_en
     // if the read didn't go through, we need to retry
-    state := Mux(io.mshr_rdy && io.wb_rdy, s_mshr_resp, s_meta_read)
+    state := Mux(io.mshr_rdy, Mux(io.wb_rdy, s_mshr_resp, s_meta_read), s_invalid)
   } .elsewhen (state === s_mshr_resp) {
+    io.probe_commit.valid := true.B //we have entered critical section for probe unit, consider it done and remove from listbuffer
+    io.probe_commit.bits := current_idx
     state := Mux(tag_matches && is_dirty, s_writeback_req, s_lsu_release)
   } .elsewhen (state === s_lsu_release) {
     when (io.lsu_release.fire) {
@@ -808,10 +825,71 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   //when (mshrs.io.req.map(_.fire).reduce(_||_)) { replacer.miss } //enhhh maybe we want to rework stuff? idk
   tl_out.a <> mshrs.io.mem_acquire
 
+  // probe buffer to go around stalls
+  // val probe_req_buffer = Module(new ListBuffer(ListBufferParameters(Flipped(Decoupled(new TLBundleB(edge.bundle))), cfg.nMSHRs + 1, 1, false)))
+  val probe_req_buffer = RegInit(
+    VecInit(Seq.fill(cfg.nMSHRs + 1)(0.U.asTypeOf(new TLBundleB(edge.bundle))))
+  )
+  val probe_req_status = RegInit(
+    VecInit(Seq.fill(cfg.nMSHRs + 1)(0.U.asTypeOf(new ProbeStatusBundle(cfg.nMSHRs))))
+  )
+  val probe_buf_next_idx = Wire(UInt(log2Ceil(cfg.nMSHRs + 1).W))
+
+  val oldest_probe_idx: UInt = probe_req_status.zipWithIndex.map{case (data, idx) => 
+    (data, idx.U)}.reduce { (a, b) => MuxT((a._1.age > b._1.age) && (a._1.valid), a, MuxT(b._1.valid, b, a))}._2 //get the oldest valid pending probe (equal ages are for initial state)
+
   // probes and releases
-  prober.io.req.valid   := tl_out.b.valid && !lrsc_valid
-  tl_out.b.ready        := prober.io.req.ready && !lrsc_valid
-  prober.io.req.bits    := tl_out.b.bits
+  // prober.io.req.valid   := tl_out.b.valid && !lrsc_valid
+  // tl_out.b.ready        := prober.io.req.ready && !lrsc_valid
+  // prober.io.req.bits    := tl_out.b.bits
+  prober.io.req.valid   := probe_req_status(oldest_probe_idx).valid && !lrsc_valid
+  prober.io.idx         := oldest_probe_idx
+  tl_out.b.ready        := !(probe_req_status.map(_.valid).andR) //we can accept more probes so long as we have *any* set free in buffer
+  prober.io.req.bits    := probe_req_buffer(oldest_probe_idx)
+
+  probe_buf_next_idx := probe_req_status.zipWithIndex.map{case (data, idx) => 
+    (data, idx.U)}.reduce { (a, b) => MuxT((!a._1.valid), a, b)}._2
+
+  when(!mshrs.io.probe_rdy){
+    //set busy flag for offending probe
+    for (i <- 0 until (cfg.nMSHRs + 1)) {
+      when (probe_req_status(i).valid && probe_req_buffer(i).address === prober.io.state.bits){
+        probe_req_status(i).blocked := true.B
+      }
+    }
+  }
+
+  when(mshrs.io.clear_mshr.valid){
+    //clear busy flag for offending probe
+    for (i <- 0 until (cfg.nMSHRs + 1)) {
+      when (probe_req_status(i).valid && probe_req_buffer(i).address === mshrs.io.clear_mshr.bits){
+        probe_req_status(i).blocked := false.B
+      }
+    }
+  }
+
+  when(tl_out.b.valid && !probe_req_status(probe_buf_next_idx).valid){ //fill listbuffer and bypass request to prober, iff there is room in listbuffer to store request in the event it gets killed
+    when(!(probe_req_status.map(_.valid).orR)){ //when there are no valid reqs in the listbuffer
+      prober.io.req.valid := tl_out.b.valid && !lrsc_valid //bypass current request to prober
+      prober.io.req.bits  := tl_out.b.bits
+      prober.io.idx       := probe_buf_next_idx
+    }
+    probe_req_buffer(probe_buf_next_idx) := tl_out.b.bits
+
+    probe_req_status(probe_buf_next_idx).valid := true.B
+
+    for(i <- 0 until (cfg.nMSHRs + 1)){ //set & increment LRU
+      probe_req_status(i).age := Mux(i.U === probe_buf_next_idx, 0.U, 
+        Mux(probe_req_status(probe_buf_next_idx).age > probe_req_status(i).age, 
+          probe_req_status(i).age + 1.U, probe_req_status(i).age))
+    }
+
+  }
+
+  when(prober.io.probe_commit.valid){ //when probe complete (accepted by hardware = mshr_resp state :)
+    probe_req_status(prober.io.probe_commit.bits).valid := false.B //do NOT clear age info to keep updates in order
+  }
+
   prober.io.way_en      := s2_tag_match_way(0)
   prober.io.block_state := s2_hit_state(0)
   metaWriteArb.io.in(1) <> prober.io.meta_write
@@ -836,7 +914,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   tl_out.e <> mshrs.io.mem_finish
 
   // writebacks
-  val wbArb = Module(new Arbiter(new WritebackReq(edge.bundle), 2))
+  val wbArb = Module(new Arbiter(new WritebackReq(edge.bundle), 2)) //prober > mshr -> this is okay, I think, maybe
   // 0 goes to prober, 1 goes to MSHR evictions
   wbArb.io.in(0)       <> prober.io.wb_req
   wbArb.io.in(1)       <> mshrs.io.wb_req
@@ -845,12 +923,12 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   mshrs.io.wb_resp      := wb.io.resp
   wb.io.mem_grant       := tl_out.d.fire && tl_out.d.bits.source === cfg.nMSHRs.U
 
-  val lsu_release_arb = Module(new Arbiter(new TLBundleC(edge.bundle), 2))
+  val lsu_release_arb = Module(new Arbiter(new TLBundleC(edge.bundle), 2)) //writeback > prober -> I forsee an issue here.
   io.lsu.release <> lsu_release_arb.io.out
   lsu_release_arb.io.in(0) <> wb.io.lsu_release
   lsu_release_arb.io.in(1) <> prober.io.lsu_release
 
-  TLArbiter.lowest(edge, tl_out.c, wb.io.release, prober.io.rep)
+  TLArbiter.lowest(edge, tl_out.c, wb.io.release, prober.io.rep) //writeback > prober
 
   io.lsu.perf.release := edge.done(tl_out.c)
   io.lsu.perf.acquire := edge.done(tl_out.a)
