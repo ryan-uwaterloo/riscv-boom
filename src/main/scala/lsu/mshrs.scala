@@ -113,6 +113,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
   val req_tag = req.addr >> untagBits
   val req_block_addr = (req.addr >> blockOffBits) << blockOffBits
   val req_needs_wb = RegInit(false.B)
+  val wb_acked = RegInit(true.B)
 
   val new_coh = RegInit(ClientMetadata.onReset)
   val (_, shrink_param, coh_on_clear) = req.old_meta.coh.onCacheControl(M_FLUSH)
@@ -190,6 +191,10 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     when (is_hit_again) {
       new_coh := dirtier_coh
     }
+  }
+
+  when (io.wb_resp) {
+    wb_acked := true.B
   }
 
   def handle_pri_req(old_state: UInt): UInt = {
@@ -324,6 +329,8 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
       state      := s_wb_req
     }
   } .elsewhen (state === s_wb_req) {
+    wb_acked := false.B
+
     io.wb_req.valid          := true.B
 
     io.wb_req.bits.tag       := req.old_meta.tag
@@ -334,11 +341,11 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     io.wb_req.bits.voluntary := true.B
     io.wb_req.bits.has_data  := wb_has_data
     when (io.wb_req.fire) {
-      state := s_wb_resp
+      state := s_commit_line
     }
   } .elsewhen (state === s_wb_resp) {
-    when (io.wb_resp) {
-      state := s_commit_line
+    when (wb_acked) {
+      state := s_mem_finish_2
     }
   } .elsewhen (state === s_commit_line) {
     io.lb_read.valid       := true.B
@@ -385,7 +392,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     io.mem_finish.bits  := grantack.bits
     when (io.mem_finish.fire || !grantack.valid) {
       grantack.valid := false.B
-      state := s_mem_finish_2
+      state := s_wb_resp
     }
   } .elsewhen (state === s_mem_finish_2) {
     io.clear_mshr.valid := true.B 
@@ -555,6 +562,7 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
     val clear_all = Input(Bool()) // Clears all uncommitted MSHRs to prepare for fence
 
     val wb_resp   = Input(Bool())
+    val wb_resp_src = Input(UInt(log2Ceil(cfg.nMSHRs).W))
 
     val fence_rdy = Output(Bool())
     val probe_rdy = Output(Bool())
@@ -680,7 +688,7 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
 
     mshr.io.prober_state := io.prober_state
 
-    mshr.io.wb_resp      := io.wb_resp
+    mshr.io.wb_resp      := io.wb_resp & (io.wb_resp_src === i.U(log2Ceil(cfg.nMSHRs).W))
 
     meta_write_arb.io.in(i) <> mshr.io.meta_write
     meta_read_arb.io.in(i)  <> mshr.io.meta_read

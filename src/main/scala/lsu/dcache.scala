@@ -44,7 +44,7 @@ class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1Hella
   val data_req_cnt = RegInit(0.U(log2Up(refillCycles+1).W))
   val (_, last_beat, all_beats_done, beat_count) = edge.count(io.release)
   val wb_buffer = Reg(Vec(refillCycles, UInt(encRowBits.W)))
-  val acked = RegInit(false.B)
+  // val acked = RegInit(false.B)
 
   io.idx.valid       := state =/= s_invalid
   io.idx.bits        := req.idx
@@ -70,14 +70,14 @@ class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1Hella
                           data = wb_buffer(data_req_cnt))
 
   val voluntaryRelease = edge.Release(
-                          fromSource = id.U,
+                          fromSource = req.source,
                           toAddress = r_address,
                           lgSize = lgCacheBlockBytes.U,
                           shrinkPermissions = req.param,
                           data = wb_buffer(data_req_cnt))._2
 
   val voluntaryReleaseNoData = edge.Release( //this overloads to a Release instead of a ReleaseData (yay scala)
-                          fromSource = id.U,
+                          fromSource = req.source,
                           toAddress = r_address,
                           lgSize = lgCacheBlockBytes.U,
                           shrinkPermissions = req.param)._2
@@ -89,7 +89,7 @@ class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1Hella
       state := Mux(io.req.bits.has_data, s_fill_buffer, s_release) //mux in a fill bypass for non-data acks.
       data_req_cnt := Mux(io.req.bits.has_data, 0.U, (refillCycles-1).U) //if no data, play for 1 beat only
       req := io.req.bits
-      acked := false.B
+      // acked := false.B
     }
   } .elsewhen (state === s_fill_buffer) {
     io.meta_read.valid := data_req_cnt < refillCycles.U //in a pro gamer uncommented move, the wb unit needs to read the metadata array to provide the correct address to the cache for its uop tracking LMFAO
@@ -130,22 +130,22 @@ class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1Hella
     io.release.bits := Mux(req.voluntary, Mux(req.has_data, voluntaryRelease, voluntaryReleaseNoData), probeResponse) //if it has no data...
     io.resp := Mux(req.has_data && req.voluntary, false.B, true.B)
 
-    when (io.mem_grant) {
-      acked := true.B
-    }
+    // when (io.mem_grant) {
+    //   acked := true.B
+    // }
     when (io.release.fire) {
       data_req_cnt := data_req_cnt + 1.U
     }
     when ((data_req_cnt === (refillCycles-1).U) && io.release.fire) {
-      state := Mux(req.voluntary, s_grant, s_invalid)
+      state := s_invalid //Mux(req.voluntary, s_grant, s_invalid)
     }
-  } .elsewhen (state === s_grant) {
-    when (io.mem_grant) {
-      acked := true.B
-    }
-    when (acked) {
-      state := s_invalid
-    }
+  // } .elsewhen (state === s_grant) {
+    // when (io.mem_grant) {
+    //   acked := true.B
+    // }
+    // when (acked) {
+    //   state := s_invalid
+    // }
   } .elsewhen (state === s_release) {
     io.lsu_release.valid := true.B
     io.lsu_release.bits := probeResponse
@@ -898,8 +898,8 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   mshrs.io.prober_state := prober.io.state
 
   // refills
-  when (tl_out.d.bits.source === cfg.nMSHRs.U) {
-    // This should be ReleaseAck
+  when (tl_out.d.bits.opcode === 6.U) {
+    // ReleaseAcks
     tl_out.d.ready := true.B
     mshrs.io.mem_grant.valid := false.B
     mshrs.io.mem_grant.bits  := DontCare
@@ -920,7 +920,8 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   wbArb.io.in(1)       <> mshrs.io.wb_req
   wb.io.req            <> wbArb.io.out
   wb.io.data_resp       := s2_data_muxed(0)
-  mshrs.io.wb_resp      := wb.io.resp
+  mshrs.io.wb_resp      := tl_out.d.fire && tl_out.d.bits.opcode === 6.U //ReleaseData
+  mshrs.io.wb_resp_src  := tl_out.d.bits.source
   wb.io.mem_grant       := tl_out.d.fire && tl_out.d.bits.source === cfg.nMSHRs.U
 
   val lsu_release_arb = Module(new Arbiter(new TLBundleC(edge.bundle), 2)) //writeback > prober -> I forsee an issue here.
