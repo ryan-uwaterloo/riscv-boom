@@ -196,6 +196,7 @@ class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
   io.meta_write.bits.tag := req_tag
   io.meta_write.bits.data.tag := req_tag
   io.meta_write.bits.data.coh := new_coh
+  io.meta_write.bits.data.stale := false.B
 
   io.wb_req.valid := state === s_writeback_req
   io.wb_req.bits.source := req.source
@@ -204,6 +205,7 @@ class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
   io.wb_req.bits.param := report_param
   io.wb_req.bits.way_en := way_en
   io.wb_req.bits.voluntary := false.B
+  io.wb_req.bits.has_data := true.B
 
 
   io.mshr_wb_rdy := !state.isOneOf(s_release, s_writeback_req, s_writeback_resp, s_meta_write, s_meta_write_resp)
@@ -438,7 +440,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   mshrs.io.rob_head_idx := io.lsu.rob_head_idx
 
   // tags
-  def onReset = L1Metadata(0.U, ClientMetadata.onReset)
+  def onReset = L1Metadata(0.U, ClientMetadata.onReset, false.B)
   val meta = Seq.fill(memWidth) { Module(new L1MetadataArray(onReset _)) }
   val metaWriteArb = Module(new Arbiter(new L1MetaWriteReq, 2))
   // 0 goes to MSHR refills, 1 goes to prober
@@ -761,7 +763,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     mshrs.io.req(w).bits.uop.br_mask := GetNewBrMask(io.lsu.brupdate, s2_req(w).uop)
     mshrs.io.req(w).bits.addr        := s2_req(w).addr
     mshrs.io.req(w).bits.tag_match   := s2_tag_match(w)
-    mshrs.io.req(w).bits.old_meta    := Mux(s2_tag_match(w), L1Metadata(s2_repl_meta(w).tag, s2_hit_state(w)), s2_repl_meta(w))
+    mshrs.io.req(w).bits.old_meta    := Mux(s2_tag_match(w), L1Metadata(s2_repl_meta(w).tag, s2_hit_state(w), false.B), s2_repl_meta(w))
     mshrs.io.req(w).bits.way_en      := Mux(s2_tag_match(w), s2_tag_match_way(w), s2_replaced_way_en)
 
     mshrs.io.req(w).bits.data        := s2_req(w).data
