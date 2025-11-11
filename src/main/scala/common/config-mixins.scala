@@ -346,12 +346,12 @@ class WithNRTBooms(n: Int = 1) extends Config(
               fpu = Some(freechips.rocketchip.tile.FPUParams(sfmaLatency=4, dfmaLatency=4, divSqrt=true))
             ),
             dcache = Some(
-              DCacheParams(rowBits = 128, nSets=16, nWays=8, nMSHRs=1, nTLBWays=16, replacementPolicy="plru") //1 mshr only for in-order dcache accesses 
+              DCacheParams(rowBits = 128, nSets=16, nWays=2, nMSHRs=2, nTLBWays=16, replacementPolicy="plru") //1 mshr only for in-order dcache accesses 
               //(crying the hardcoding logic needs a workaround for 1 mshr), and then pLRU replacement.
               //rn I've set nSets to 16 instead of 64 to make testing easier :P
             ),
             icache = Some(
-              ICacheParams(rowBits = 128, nSets=64, nWays=8, fetchBytes=4*4)
+              ICacheParams(rowBits = 128, nSets=64, nWays=2, fetchBytes=4*4)
             ),
             tileId = i + idOffset
           ),
