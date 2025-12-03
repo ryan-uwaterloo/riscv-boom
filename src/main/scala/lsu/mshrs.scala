@@ -126,7 +126,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
 
   val (_, _, refill_done, refill_address_inc) = edge.addr_inc(io.mem_grant)
   val sec_rdy = (!cmd_requires_second_acquire && !io.req_is_probe &&
-                 !state.isOneOf(s_invalid, s_meta_write_req, s_mem_finish_1, s_mem_finish_2))// Always accept secondary misses
+                 !state.isOneOf(s_invalid, s_meta_write_req, s_mem_finish_1, s_mem_finish_2, s_wb_resp))// Accept secondary misses until we will no longer clear rpq
 
   val rpq = Module(new BranchKillableQueue(new BoomDCacheReqInternal, cfg.nRPQ, u => u.uses_ldq, false))
   rpq.io.brupdate := io.brupdate
