@@ -914,7 +914,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   tl_out.e <> mshrs.io.mem_finish
 
   // writebacks
-  val wbArb = Module(new Arbiter(new WritebackReq(edge.bundle), 2)) //prober > mshr -> this is okay, I think, maybe
+  val wbArb = Module(new RRArbiter(new WritebackReq(edge.bundle), 2)) //prober > mshr -> this is okay, I think, maybe
   // 0 goes to prober, 1 goes to MSHR evictions
   wbArb.io.in(0)       <> prober.io.wb_req
   wbArb.io.in(1)       <> mshrs.io.wb_req
@@ -924,12 +924,12 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   mshrs.io.wb_resp_src  := tl_out.d.bits.source
   wb.io.mem_grant       := tl_out.d.fire && tl_out.d.bits.source === cfg.nMSHRs.U
 
-  val lsu_release_arb = Module(new Arbiter(new TLBundleC(edge.bundle), 2)) //writeback > prober -> I forsee an issue here.
+  val lsu_release_arb = Module(new RRArbiter(new TLBundleC(edge.bundle), 2)) //writeback > prober -> I forsee an issue here.
   io.lsu.release <> lsu_release_arb.io.out
   lsu_release_arb.io.in(0) <> wb.io.lsu_release
   lsu_release_arb.io.in(1) <> prober.io.lsu_release
 
-  TLArbiter.lowest(edge, tl_out.c, wb.io.release, prober.io.rep) //writeback > prober
+  TLArbiter.robin(edge, tl_out.c, wb.io.release, prober.io.rep) //writeback > prober
 
   io.lsu.perf.release := edge.done(tl_out.c)
   io.lsu.perf.acquire := edge.done(tl_out.a)
