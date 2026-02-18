@@ -61,6 +61,7 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
     val ptw_tlb = new freechips.rocketchip.rocket.TLBPTWIO()
     val trace = Output(new TraceBundle)
     val fcsr_rm = UInt(freechips.rocketchip.tile.FPConstants.RM_SZ.W)
+    val srmcfg = Output(UInt(32.W))
   })
 
   io.ptw_tlb := DontCare
@@ -280,6 +281,8 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
   //val icache_blocked = !(io.ifu.fetchpacket.valid || RegNext(io.ifu.fetchpacket.valid))
   val icache_blocked = false.B
   csr.io.counters foreach { c => c.inc := RegNext(perfEvents.evaluate(c.eventSel)) }
+
+  io.srmcfg := custom_csrs.srmcfg
 
   //****************************************
   // Time Stamp Counter & Retired Instruction Counter

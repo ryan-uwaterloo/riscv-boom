@@ -151,7 +151,25 @@ class BoomCustomCSRs(implicit p: Parameters) extends freechips.rocketchip.tile.C
   def disableOOO = getOrElse(chickenCSR, _.value(3), true.B)
   def marchid = CustomCSR.constant(CSRs.marchid, BigInt(2))
 
-  override def decls: Seq[CustomCSR] = super.decls :+ marchid
+  def srmcfgCSR = {
+    val mask = BigInt(
+      0xFFF << 0 | // RCID
+      0xFFF << 16  // MCID
+    )
+    Some(CustomCSR(0x15A, mask, Some(0)))
+  }
+
+  def srmcfg = getOrElse(srmcfgCSR, _.value, 0.U)
+
+  // val srmcfg = Wire(UInt())
+  // srmcfg := getOrElse(srmcfgCSR, _.value, 0.U)
+
+  // I think this isn't actually a wire, need to mimick more of a csr.io sitation to use it
+  
+
+  // def srmcfg = csrs(srmcfgCSR.id).value
+
+  override def decls: Seq[CustomCSR] = super.decls :+ marchid :+ srmcfgCSR.get
 }
 
 /**

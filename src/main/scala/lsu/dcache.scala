@@ -233,6 +233,7 @@ class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
   io.meta_write.bits.data.tag := req_tag
   io.meta_write.bits.data.coh := new_coh
   io.meta_write.bits.data.stale := new_coh === 0.U // if probed to invalid, mark as stale.
+  io.meta_write.bits.data.srmcfg_tag := 0.U // L2 routing starts here I believe?
 
   io.wb_req.valid := state === s_writeback_req
   io.wb_req.bits.source := req.source
@@ -461,9 +462,24 @@ class BoomNonBlockingDCache(staticIdForMetadataUseOnly: Int)(implicit p: Paramet
   require(!tileParams.core.haveCFlush || cfg.scratch.isEmpty, "CFLUSH_D_L1 instruction requires a D$")
 }
 
+// class BoomL1Metadata(tagBits: Int, coh: ClientMetadata, stale: Boolean, srmcfg: UInt) extends L1Metadata(tagBits, coh, stale) {
+//   val srmcfg_tag = srmcfg
+// }
+
+// object BoomL1Metadata {
+//   def apply(tag: UInt, coh: ClientMetadata, stale: Boolean, srmcfg: UInt): BoomL1Metadata = {
+//     val meta = Wire(new BoomL1Metadata(tag.getWidth, coh, stale, srmcfg))
+//     meta.tag := tag
+//     meta.coh := coh
+//     meta.stale := stale
+//     meta.srmcfg_tag := srmcfg
+//     meta
+//   }
+// }
 
 class BoomDCacheBundle(implicit p: Parameters, edge: TLEdgeOut) extends BoomBundle()(p) {
   val lsu   = Flipped(new LSUDMemIO)
+  val srmcfg = Input(UInt(32.W))
 }
 
 class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModuleImp(outer)
@@ -494,7 +510,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   mshrs.io.rob_head_idx := io.lsu.rob_head_idx
 
   // tags
-  def onReset = L1Metadata(0.U, ClientMetadata.onReset, false.B)
+  def onReset = L1Metadata(0.U, ClientMetadata.onReset, false.B, 0.U)
   val meta = Seq.fill(memWidth) { Module(new L1MetadataArray(onReset _)) }
   val metaWriteArb = Module(new Arbiter(new L1MetaWriteReq, 2))
   // 0 goes to MSHR refills, 1 goes to prober
@@ -815,6 +831,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   // If MSHR is available and this is only a store(not a amo), we don't need to wait for resp later
   s2_store_failed := s2_valid(0) && s2_nack(0) && s2_send_nack(0) && s2_req(0).uop.uses_stq
 
+  val srmcfg = io.srmcfg
   // Miss handling
   for (w <- 0 until memWidth) {
     mshrs.io.req(w).valid := s2_valid(w)          &&
@@ -835,7 +852,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     mshrs.io.req(w).bits.uop.br_mask := GetNewBrMask(io.lsu.brupdate, s2_req(w).uop)
     mshrs.io.req(w).bits.addr        := s2_req(w).addr
     mshrs.io.req(w).bits.tag_match   := s2_tag_match(w)
-    mshrs.io.req(w).bits.old_meta    := Mux(s2_tag_match(w), L1Metadata(s2_repl_meta(w).tag, s2_hit_state(w), s2_repl_meta(w).stale), s2_repl_meta(w))
+    mshrs.io.req(w).bits.old_meta    := Mux(s2_tag_match(w), L1Metadata(s2_repl_meta(w).tag, s2_hit_state(w), s2_repl_meta(w).stale, ((srmcfg & (0xFFF.U << 12)) >> 4) | (srmcfg & 0xFFF.U)), s2_repl_meta(w))
     mshrs.io.req(w).bits.way_en      := Mux(s2_tag_match(w), s2_tag_match_way(w), s2_replaced_way_en)
 
     mshrs.io.req(w).bits.data        := s2_req(w).data
