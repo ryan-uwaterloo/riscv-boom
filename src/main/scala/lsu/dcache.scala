@@ -34,6 +34,10 @@ class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1Hella
     val lsu_release = Decoupled(new TLBundleC(edge.bundle))
   })
 
+  // clock cycle counter
+    val clk_cycle = RegInit(0.U(32.W))
+    clk_cycle := clk_cycle + 1.U
+
   val req = Reg(new WritebackReq(edge.bundle))
   val s_invalid :: s_fill_buffer :: s_lsu_release :: s_active :: s_grant :: s_release :: Nil = Enum(6)//add release state
   val state = RegInit(s_invalid)
@@ -86,6 +90,9 @@ class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1Hella
   when (state === s_invalid) {
     io.req.ready := true.B
     when (io.req.fire) {
+      when(io.req.bits.voluntary){
+        printf(cf"@ clk_cycle ${clk_cycle}: New L1 Release! Address: 0x${Cat(io.req.bits.tag, io.req.bits.idx) << blockOffBits}%x, Core: 0x${tileId}%x\n")
+      }
       state := Mux(io.req.bits.has_data, s_fill_buffer, s_release) //mux in a fill bypass for non-data acks.
       data_req_cnt := Mux(io.req.bits.has_data, 0.U, (refillCycles-1).U) //if no data, play for 1 beat only
       req := io.req.bits
@@ -138,6 +145,9 @@ class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1Hella
     }
     when ((data_req_cnt === (refillCycles-1).U) && io.release.fire) {
       state := s_invalid //Mux(req.voluntary, s_grant, s_invalid)
+      when(req.voluntary){
+        printf(cf"@ clk_cycle ${clk_cycle}: L1 Release Complete! Address: 0x${Cat(req.tag, req.idx) << blockOffBits}%x, Core: 0x${tileId}%x\n")
+      }
     }
   // } .elsewhen (state === s_grant) {
     // when (io.mem_grant) {
@@ -181,6 +191,10 @@ class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
     val idx = Input(UInt(log2Ceil(cfg.nMSHRs+1).W)) //what probe are we servicing rn?
     val probe_commit = Valid(UInt(log2Ceil(cfg.nMSHRs+1).W)) //what probe have we just completed?
   })
+
+  // clock cycle counter
+    val clk_cycle = RegInit(0.U(32.W))
+    clk_cycle := clk_cycle + 1.U
 
   val (s_invalid :: s_meta_read :: s_meta_resp :: s_mshr_req ::
        s_mshr_resp :: s_lsu_release :: s_release :: s_writeback_req :: s_writeback_resp ::
@@ -247,6 +261,7 @@ class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
       state := s_meta_read
       req := io.req.bits
       current_idx := io.idx
+      printf(cf"@ clk_cycle ${clk_cycle}: New L1 Probe Req! Address: 0x${io.req.bits.address}%x, Core: 0x${tileId}%x\n")
     }
   } .elsewhen (state === s_meta_read) {
     when (io.meta_read.fire) {
@@ -260,6 +275,9 @@ class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
     way_en := io.way_en
     // if the read didn't go through, we need to retry
     state := Mux(io.mshr_rdy, Mux(io.wb_rdy, s_mshr_resp, s_meta_read), s_invalid)
+    when (!io.mshr_rdy && !io.wb_rdy) {
+      printf(cf"@ clk_cycle ${clk_cycle}: L1 Probe Req abandoned due to set lock! Address: 0x${req.address}%x, Core: 0x${tileId}%x\n")
+    }
   } .elsewhen (state === s_mshr_resp) {
     io.probe_commit.valid := true.B //we have entered critical section for probe unit, consider it done and remove from listbuffer
     io.probe_commit.bits := current_idx
@@ -271,6 +289,9 @@ class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
   } .elsewhen (state === s_release) {
     when (io.rep.ready) {
       state := Mux(tag_matches, s_meta_write, s_invalid)
+      when(!tag_matches){
+        printf(cf"@ clk_cycle ${clk_cycle}: L1 Probe Complete as miss! Address: 0x${req.address}%x, Core: 0x${tileId}%x\n")
+      }
     }
   } .elsewhen (state === s_writeback_req) {
     when (io.wb_req.fire) {
@@ -287,6 +308,11 @@ class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
     }
   } .elsewhen (state === s_meta_write_resp) {
     state := s_invalid
+    when(is_dirty){
+      printf(cf"@ clk_cycle ${clk_cycle}: L1 Probe Complete as dirty hit! Address: 0x${req.address}%x, Core: 0x${tileId}%x\n")
+    }.otherwise{
+      printf(cf"@ clk_cycle ${clk_cycle}: L1 Probe Complete as clean hit! Address: 0x${req.address}%x, Core: 0x${tileId}%x\n")
+    }
   }
 }
 
