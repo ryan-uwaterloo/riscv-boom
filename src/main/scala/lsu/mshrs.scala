@@ -317,7 +317,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
   } .elsewhen (state === s_meta_resp_1) {
     state := s_meta_resp_2
   } .elsewhen (state === s_meta_resp_2) { //io.meta_resp.bits.coh.onCacheControl(M_FLUSH)._1 (for line below xd) modified the Metadata.scala file to change silent eviction policy... surely this breaks nothing right :)
-    val needs_wb = io.meta_resp.bits.coh.onCacheControl(M_FLUSH)._1 || (io.meta_resp.bits.stale && io.meta_resp.bits.coh.state === 0.U && !req.tag_match)// overwrite this to wb if not invalid or if stale, if we don't match tag (updating invalid way)
+    val needs_wb = io.meta_resp.bits.coh.onCacheControl(M_FLUSH)._1 && !req.tag_match || (io.meta_resp.bits.stale && io.meta_resp.bits.coh.state === 0.U && !req.tag_match)// overwrite this to wb if not invalid or if stale, if we don't match tag (updating invalid way)
     dontTouch(needs_wb)
     wb_has_data := (io.meta_resp.bits.coh.onCacheControl(M_FLUSH)._1 && io.meta_resp.bits.coh.state === 3.U)//only on dirty evict do we notify
     state := Mux(!io.meta_resp.valid, s_meta_read, // Prober could have nack'd this read
