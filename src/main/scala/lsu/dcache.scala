@@ -684,7 +684,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
                          Mux(s1_type === t_replay, s1_replay_way_en,
                          Mux(s1_type === t_wb,     s1_wb_way_en,
                          Mux(s1_type === t_mshr_meta_read, s1_mshr_meta_read_way_en,
-                           wayMap((w: Int) => s1_tag_eq_way(i)(w) && meta(i).io.resp(w).coh.isValid()).asUInt))))
+                           wayMap((w: Int) => s1_tag_eq_way(i)(w) && (meta(i).io.resp(w).coh.isValid() || meta(i).io.resp(w).stale)).asUInt))))
 
   val s1_wb_idx_matches = widthMap(i => (s1_addr(i)(untagBits-1,blockOffBits) === wb.io.idx.bits) && wb.io.idx.valid)
 
