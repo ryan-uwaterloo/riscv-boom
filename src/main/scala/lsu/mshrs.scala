@@ -103,6 +103,10 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
   // s_meta_write_req  : Write the metadata for new cache lne
   // s_meta_write_resp :
 
+  // clock cycle counter
+    val clk_cycle = RegInit(0.U(32.W))
+    clk_cycle := clk_cycle + 1.U
+
   val s_invalid :: s_refill_req :: s_refill_resp :: s_drain_rpq_loads :: s_meta_read :: s_meta_resp_1 :: s_meta_resp_2 :: s_meta_clear :: s_wb_meta_read :: s_wb_req :: s_wb_resp :: s_commit_line :: s_drain_rpq :: s_meta_write_req :: s_mem_finish_1 :: s_mem_finish_2 :: s_prefetched :: s_prefetch :: Nil = Enum(18)
   val state = RegInit(s_invalid)
 
@@ -217,6 +221,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     grant_had_data := false.B
 
     when (io.req_pri_val && io.req_pri_rdy) {
+      printf(cf"@ clk_cycle ${clk_cycle}: New L1 Request! Address: 0x${io.req.addr(31, 0)}%x, Core: 0x${tileId}%x\n")
       state := handle_pri_req(state)
     }
   } .elsewhen (state === s_refill_req) {
@@ -367,6 +372,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     io.meta_write.bits.data.tag := req_tag
     io.meta_write.bits.way_en   := req.way_en
     when (io.meta_write.fire) {
+      printf(cf"@ clk_cycle ${clk_cycle}: L1 Request data sent to core! Address: 0x${req.addr(31, 0)}%x, Core: 0x${tileId}%x\n")
       state := s_mem_finish_1
       finish_to_prefetch := false.B
     }
@@ -379,6 +385,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     }
   } .elsewhen (state === s_mem_finish_2) {
     state := Mux(finish_to_prefetch, s_prefetch, s_invalid)
+    printf(cf"@ clk_cycle ${clk_cycle}: L1 Request MSHR Free! Address: 0x${req.addr(31, 0)}%x, Core: 0x${tileId}%x\n")
   } .elsewhen (state === s_prefetch) {
     io.req_pri_rdy := true.B
     when ((io.req_sec_val && !io.req_sec_rdy) || io.clear_prefetch) {
