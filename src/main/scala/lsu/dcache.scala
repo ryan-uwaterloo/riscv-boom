@@ -84,9 +84,6 @@ class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1Hella
   when (state === s_invalid) {
     io.req.ready := true.B
     when (io.req.fire) {
-      when(io.req.bits.voluntary){
-        printf(cf"@ clk_cycle ${clk_cycle}: New L1 Release! Address: 0x${Cat(io.req.bits.tag, io.req.bits.idx) << blockOffBits}%x, Core: 0x${tileId}%x\n")
-      }
       state := s_fill_buffer
       data_req_cnt := 0.U
       req := io.req.bits
