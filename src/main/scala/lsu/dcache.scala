@@ -90,9 +90,6 @@ class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1Hella
   when (state === s_invalid) {
     io.req.ready := true.B
     when (io.req.fire) {
-      when(io.req.bits.voluntary){
-        printf(cf"@ clk_cycle ${clk_cycle}: New L1 Release! Address: 0x${Cat(io.req.bits.tag, io.req.bits.idx) << blockOffBits}%x, Core: 0x${tileId}%x\n")
-      }
       state := Mux(io.req.bits.has_data, s_fill_buffer, s_release) //mux in a fill bypass for non-data acks.
       data_req_cnt := Mux(io.req.bits.has_data, 0.U, (refillCycles-1).U) //if no data, play for 1 beat only
       req := io.req.bits
@@ -856,9 +853,12 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   val probe_req_buffer = RegInit(
     VecInit(Seq.fill(cfg.nMSHRs + 1)(0.U.asTypeOf(new TLBundleB(edge.bundle))))
   )
-  val probe_req_status = RegInit(
-    VecInit(Seq.fill(cfg.nMSHRs + 1)(0.U.asTypeOf(new ProbeStatusBundle(cfg.nMSHRs))))
-  )
+  val probe_req_status_no_ages = Seq.fill(cfg.nMSHRs + 1)(0.U.asTypeOf(new ProbeStatusBundle(cfg.nMSHRs)))
+  val probe_req_status_ages = probe_req_status_no_ages.zipWithIndex.map{case (data, idx) =>
+    data.age := idx.U
+    data
+  }
+  val probe_req_status = RegInit(VecInit(probe_req_status_ages))
   val probe_buf_next_idx = Wire(UInt(log2Ceil(cfg.nMSHRs + 1).W))
 
   val oldest_probe_idx: UInt = probe_req_status.zipWithIndex.map{case (data, idx) => 

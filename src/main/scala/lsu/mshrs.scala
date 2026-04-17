@@ -332,6 +332,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
 
     when (io.meta_write.fire) {
       state      := s_wb_req
+      printf(cf"@ clk_cycle ${clk_cycle}: New L1 Release! Address: 0x${Cat(req.old_meta.tag, req_idx) << blockOffBits}%x, Core: 0x${tileId}%x\n")
     }
   } .elsewhen (state === s_wb_req) {
     wb_acked := false.B
