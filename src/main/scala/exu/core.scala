@@ -61,7 +61,6 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
     val ptw_tlb = new freechips.rocketchip.rocket.TLBPTWIO()
     val trace = Output(new TraceBundle)
     val fcsr_rm = UInt(freechips.rocketchip.tile.FPConstants.RM_SZ.W)
-    val srmcfg = Output(UInt(32.W))
   })
 
   io.ptw_tlb := DontCare
@@ -282,7 +281,7 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
   val icache_blocked = false.B
   csr.io.counters foreach { c => c.inc := RegNext(perfEvents.evaluate(c.eventSel)) }
 
-  io.srmcfg := custom_csrs.srmcfg
+  io.lsu.qosid := custom_csrs.qosid // unsure if this is the best approach
 
   //****************************************
   // Time Stamp Counter & Retired Instruction Counter
@@ -385,6 +384,7 @@ class BoomCore()(implicit p: Parameters) extends BoomModule
   io.ifu.bp      := csr.io.bp
   io.ifu.mcontext := csr.io.mcontext
   io.ifu.scontext := csr.io.scontext
+  io.ifu.qosid := custom_csrs.qosid
 
   io.ifu.flush_icache := (0 until coreWidth).map { i =>
     (rob.io.commit.arch_valids(i) && rob.io.commit.uops(i).is_fencei) ||

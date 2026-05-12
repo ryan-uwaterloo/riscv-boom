@@ -41,11 +41,15 @@ class ICache(
   val icacheParams: ICacheParams,
   val staticIdForMetadataUseOnly: Int)(implicit p: Parameters)
   extends LazyModule
+  with HasTileParameters
 {
   lazy val module = new ICacheModule(this)
-  val masterNode = TLClientNode(Seq(TLMasterPortParameters.v1(Seq(TLMasterParameters.v1(
-    sourceId = IdRange(0, 1 + icacheParams.prefetch.toInt), // 0=refill, 1=hint
-    name = s"Core ${staticIdForMetadataUseOnly} ICache")))))
+  private val boomCore = tileParams.core.asInstanceOf[BoomCoreParams]
+  val masterNode = TLClientNode(Seq(TLMasterPortParameters.v1(
+    Seq(TLMasterParameters.v1(
+      sourceId = IdRange(0, 1 + icacheParams.prefetch.toInt), // 0=refill, 1=hint
+      name = s"Core ${staticIdForMetadataUseOnly} ICache")),
+    requestFields = Seq(QOSIDField(boomCore.rcidBits, boomCore.mcidBits)))))
 
   val size = icacheParams.nSets * icacheParams.nWays * icacheParams.blockBytes
   private val wordBytes = icacheParams.fetchBytes
@@ -80,6 +84,8 @@ class ICacheBundle(val outer: ICache) extends BoomBundle()(outer.p)
   val resp = Valid(new ICacheResp(outer))
   val invalidate = Input(Bool())
 
+  val qosid = Input(UInt(qosidBits.W))
+
   val perf = Output(new Bundle {
     val acquire = Bool()
   })
@@ -103,6 +109,7 @@ object GetPropertyByHartId
  */
 class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
   with HasBoomFrontendParameters
+  with HasBoomCoreParameters
 {
   val enableICacheDelay = tileParams.core.asInstanceOf[BoomCoreParams].enableICacheDelay
   val io = IO(new ICacheBundle(outer))
@@ -125,10 +132,12 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
 
   val s0_valid = io.req.fire
   val s0_vaddr = io.req.bits.addr
+  val s0_qosid = io.qosid
 
   val s1_valid = RegNext(s0_valid)
   val s1_tag_hit = Wire(Vec(nWays, Bool()))
   val s1_hit = s1_tag_hit.reduce(_||_)
+  val s1_qosid = RegNext(s0_qosid)
   val s2_valid = RegNext(s1_valid && !io.s1_kill)
   val s2_hit = RegNext(s1_hit)
 
@@ -141,6 +150,7 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
   val refill_tag = refill_paddr(tagBits+untagBits-1,untagBits)
   val refill_idx = refill_paddr(untagBits-1,blockOffBits)
   val refill_one_beat = tl_out.d.fire && edge_out.hasData(tl_out.d.bits)
+  val refill_qosid = RegEnable(s1_qosid, s1_valid && !(refill_valid || s2_miss))
 
   io.req.ready := !refill_one_beat
 
@@ -151,10 +161,12 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
 
   val repl_way = if (isDM) 0.U else LFSR(16, refill_fire)(log2Ceil(nWays)-1,0)
 
-  val tag_array = SyncReadMem(nSets, Vec(nWays, UInt(tagBits.W)))
+  val fullTagBits = tagBits + qosidBits
+  val tag_array = SyncReadMem(nSets, Vec(nWays, UInt(fullTagBits.W)))
   val tag_rdata = tag_array.read(s0_vaddr(untagBits-1, blockOffBits), !refill_done && s0_valid)
+  val refill_fullTag = Cat(refill_qosid, refill_tag)
   when (refill_done) {
-    tag_array.write(refill_idx, VecInit(Seq.fill(nWays)(refill_tag)), Seq.tabulate(nWays)(repl_way === _.U))
+    tag_array.write(refill_idx, VecInit(Seq.fill(nWays)(refill_fullTag)), Seq.tabulate(nWays)(repl_way === _.U))
   }
 
   val vb_array = RegInit(0.U((nSets*nWays).W))
@@ -175,7 +187,10 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
     val s1_tag = io.s1_paddr(tagBits+untagBits-1,untagBits)
     val s1_vb = vb_array(Cat(i.U, s1_idx))
     val tag = tag_rdata(i)
-    s1_tag_hit(i) := s1_vb && tag === s1_tag
+    val qos_ok =
+      if (qosidBits > 0) tag(fullTagBits-1, tagBits) === s1_qosid
+      else true.B
+    s1_tag_hit(i) := s1_vb && tag(tagBits-1, 0) === s1_tag && qos_ok
   }
   assert(PopCount(s1_tag_hit) <= 1.U || !s1_valid)
 
@@ -329,6 +344,10 @@ class ICacheModule(outer: ICache) extends LazyModuleImp(outer)
     fromSource = 0.U,
     toAddress = (refill_paddr >> blockOffBits) << blockOffBits,
     lgSize = lgCacheBlockBytes.U)._2
+  tl_out.a.bits.user.lift(QOSIDKey).foreach { q =>
+    q.rcid := refill_qosid(qosidBits-1, mcidBits)
+    q.mcid := refill_qosid(mcidBits-1, 0)
+  }
   tl_out.b.ready := true.B
   tl_out.c.valid := false.B
   tl_out.e.valid := false.B

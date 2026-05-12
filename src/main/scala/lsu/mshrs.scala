@@ -22,10 +22,11 @@ import boom.util.{IsKilledByBranch, GetNewBrMask, BranchKillableQueue, IsOlder, 
 
 class BoomDCacheReqInternal(implicit p: Parameters) extends BoomDCacheReq()(p)
   with HasL1HellaCacheParameters
+  with HasBoomCoreParameters
 {
   // miss info
   val tag_match = Bool()
-  val old_meta  = new L1Metadata
+  val old_meta  = new BoomL1Metadata
   val way_en    = UInt(nWays.W)
 
   // Used in the MSHRs
@@ -35,6 +36,7 @@ class BoomDCacheReqInternal(implicit p: Parameters) extends BoomDCacheReq()(p)
 
 class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
   with HasL1HellaCacheParameters
+  with HasBoomCoreParameters
 {
   val io = IO(new Bundle {
     val id = Input(UInt())
@@ -67,15 +69,16 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
 
     val refill      = Decoupled(new L1DataWriteReq)
 
-    val meta_write  = Decoupled(new L1MetaWriteReq)
-    val meta_read   = Decoupled(new L1MetaReadReq)
-    val meta_resp   = Input(Valid(new L1Metadata))
-    val wb_req      = Decoupled(new WritebackReq(edge.bundle))
+    val meta_write  = Decoupled(new BoomL1MetaWriteReq)
+    val meta_read   = Decoupled(new BoomInternalL1MetaReadReq)
+    val meta_resp   = Input(Valid(new BoomL1Metadata))
+    val wb_req      = Decoupled(new BoomWritebackReq(edge.bundle))
 
     // To inform the prefetcher when we are commiting the fetch of this line
     val commit_val  = Output(Bool())
     val commit_addr = Output(UInt(coreMaxAddrBits.W))
     val commit_coh  = Output(new ClientMetadata)
+    val commit_qosid = Output(UInt(qosidBits.W))
 
     // Reading from the line buffer
     val lb_read       = Decoupled(new LineBufferReadReq)
@@ -129,7 +132,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     new_coh.onSecondaryAccess(req.uop.mem_cmd, io.req.uop.mem_cmd)
 
   val (_, _, refill_done, refill_address_inc) = edge.addr_inc(io.mem_grant)
-  val sec_rdy = (!cmd_requires_second_acquire && !io.req_is_probe &&
+  val sec_rdy = (!cmd_requires_second_acquire && !io.req_is_probe && (io.req.qosid === req.qosid) && // unsure, do confirm
                  !state.isOneOf(s_invalid, s_meta_write_req, s_mem_finish_1, s_mem_finish_2, s_wb_resp))// Accept secondary misses until we will no longer clear rpq
 
   val rpq = Module(new BranchKillableQueue(new BoomDCacheReqInternal, cfg.nRPQ, u => u.uses_ldq, false))
@@ -178,6 +181,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
   io.commit_val          := false.B
   io.commit_addr         := req.addr
   io.commit_coh          := coh_on_grant
+  io.commit_qosid        := req.qosid
   io.meta_read.valid     := false.B
   io.meta_read.bits      := DontCare
   io.mem_finish.valid    := false.B
@@ -242,6 +246,10 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
       toAddress       = Cat(req_tag, req_idx) << blockOffBits,
       lgSize          = lgCacheBlockBytes.U,
       growPermissions = grow_param)._2
+    io.mem_acquire.bits.user.lift(QOSIDKey).foreach { q =>
+      q.rcid := req.qosid(qosidBits-1, mcidBits)
+      q.mcid := req.qosid(mcidBits-1, 0)
+    }
     when (io.mem_acquire.fire) {
       state := s_refill_resp
     }
@@ -327,6 +335,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     io.meta_write.bits.idx      := req_idx
     io.meta_write.bits.data.coh := coh_on_clear
     io.meta_write.bits.data.tag := req_tag
+    io.meta_write.bits.data.qosid := req.qosid
     io.meta_write.bits.data.stale := false.B //if we are triggering a wb, data can't be stale anymore.
     io.meta_write.bits.way_en   := req.way_en
 
@@ -346,6 +355,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     io.wb_req.bits.source    := io.id
     io.wb_req.bits.voluntary := true.B
     io.wb_req.bits.has_data  := wb_has_data
+    io.wb_req.bits.qosid     := req.old_meta.qosid
     when (io.wb_req.fire) {
       state := s_commit_line
     }
@@ -389,6 +399,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     io.meta_write.bits.data.tag := req_tag
     io.meta_write.bits.data.stale := false.B //this is an acquire getting issued!
     io.meta_write.bits.way_en   := req.way_en
+    io.meta_write.bits.qosid    := req.qosid
     when (io.meta_write.fire) {
       printf(cf"@ clk_cycle ${clk_cycle}: L1 Request data sent to core! Address: 0x${req.addr(31, 0)}%x, Core: 0x${tileId}%x\n")
       state := s_mem_finish_1
@@ -483,6 +494,10 @@ class BoomIOMSHR(id: Int)(implicit edge: TLEdgeOut, p: Parameters) extends BoomM
 
   io.mem_access.valid := state === s_mem_access
   io.mem_access.bits  := Mux(isAMO(req.uop.mem_cmd), atomics, Mux(isRead(req.uop.mem_cmd), get, put))
+  io.mem_access.bits.user.lift(QOSIDKey).foreach { q =>
+    q.rcid := req.qosid(qosidBits-1, mcidBits)
+    q.mcid := req.qosid(mcidBits-1, 0)
+  }
 
   val send_resp = isRead(req.uop.mem_cmd)
 
@@ -540,6 +555,7 @@ class LineBufferMeta(implicit p: Parameters) extends BoomBundle()(p)
 
 class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
   with HasL1HellaCacheParameters
+  with HasBoomCoreParameters
 {
   val io = IO(new Bundle {
     val req  = Flipped(Vec(memWidth, Decoupled(new BoomDCacheReqInternal))) // Req from s2 of DCache pipe
@@ -558,12 +574,12 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
     val mem_finish   = Decoupled(new TLBundleE(edge.bundle))
 
     val refill     = Decoupled(new L1DataWriteReq)
-    val meta_write = Decoupled(new L1MetaWriteReq)
-    val meta_read  = Decoupled(new L1MetaReadReq)
-    val meta_resp  = Input(Valid(new L1Metadata))
+    val meta_write = Decoupled(new BoomL1MetaWriteReq)
+    val meta_read  = Decoupled(new BoomInternalL1MetaReadReq)
+    val meta_resp  = Input(Valid(new BoomL1Metadata))
     val replay     = Decoupled(new BoomDCacheReqInternal)
     val prefetch   = Decoupled(new BoomDCacheReq)
-    val wb_req     = Decoupled(new WritebackReq(edge.bundle))
+    val wb_req     = Decoupled(new BoomWritebackReq(edge.bundle))
 
     val prober_state = Input(Valid(UInt(coreMaxAddrBits.W)))
 
@@ -640,9 +656,9 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
 
   val wb_tag_list = Wire(Vec(cfg.nMSHRs, UInt(tagBits.W)))
 
-  val meta_write_arb = Module(new Arbiter(new L1MetaWriteReq           , cfg.nMSHRs))
-  val meta_read_arb  = Module(new Arbiter(new L1MetaReadReq            , cfg.nMSHRs))
-  val wb_req_arb     = Module(new Arbiter(new WritebackReq(edge.bundle), cfg.nMSHRs))
+  val meta_write_arb = Module(new Arbiter(new BoomL1MetaWriteReq           , cfg.nMSHRs))
+  val meta_read_arb  = Module(new Arbiter(new BoomInternalL1MetaReadReq            , cfg.nMSHRs))
+  val wb_req_arb     = Module(new Arbiter(new BoomWritebackReq(edge.bundle), cfg.nMSHRs))
   val replay_arb     = Module(new Arbiter(new BoomDCacheReqInternal    , cfg.nMSHRs))
   val resp_arb       = Module(new Arbiter(new BoomDCacheResp           , cfg.nMSHRs + nIOMSHRs))
   val refill_arb     = Module(new Arbiter(new L1DataWriteReq           , cfg.nMSHRs))
@@ -651,6 +667,7 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
   val commit_vals    = Wire(Vec(cfg.nMSHRs, Bool()))
   val commit_addrs   = Wire(Vec(cfg.nMSHRs, UInt(coreMaxAddrBits.W)))
   val commit_cohs    = Wire(Vec(cfg.nMSHRs, new ClientMetadata))
+  val commit_qosid   = Wire(Vec(cfg.nMSHRs, UInt(qosidBits.W)))
 
   var sec_rdy   = false.B
 
@@ -713,6 +730,7 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
     commit_vals(i)  := mshr.io.commit_val
     commit_addrs(i) := mshr.io.commit_addr
     commit_cohs(i)  := mshr.io.commit_coh
+    commit_qosid(i) := mshr.io.commit_qosid
 
     mshr.io.mem_grant.valid := false.B
     mshr.io.mem_grant.bits  := DontCare
@@ -812,4 +830,5 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
   prefetcher.io.req_val       := RegNext(commit_vals.reduce(_||_))
   prefetcher.io.req_addr      := RegNext(Mux1H(commit_vals, commit_addrs))
   prefetcher.io.req_coh       := RegNext(Mux1H(commit_vals, commit_cohs))
+  prefetcher.io.req_qosid     := RegNext(Mux1H(commit_vals, commit_qosid))
 }
