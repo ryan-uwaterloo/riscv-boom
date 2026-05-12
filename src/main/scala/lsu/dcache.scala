@@ -253,7 +253,7 @@ class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
   io.meta_read.bits.idx := req_idx
   io.meta_read.bits.tag := req_tag
   io.meta_read.bits.way_en := ~(0.U(nWays.W))
-  io.meta_read.bits.qosid := DontCare // qosid is not used for when checking if probe hits
+  io.meta_read.bits.qosid := old_qosid // qosid is not used for when checking if probe hits
 
   io.meta_write.valid := state === s_meta_write
   io.meta_write.bits.way_en := way_en

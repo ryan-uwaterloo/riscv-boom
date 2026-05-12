@@ -318,6 +318,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     io.meta_read.valid := !io.prober_state.valid || !grantack.valid || (io.prober_state.bits(untagBits-1,blockOffBits) =/= req_idx)
     io.meta_read.bits.idx := req_idx
     io.meta_read.bits.tag := req_tag
+    io.meta_read.bits.qosid := req.qosid // not used for mshr meta reads
     io.meta_read.bits.way_en := req.way_en
     when (io.meta_read.fire) {
       state := s_meta_resp_1
@@ -397,9 +398,9 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     io.meta_write.bits.idx      := req_idx
     io.meta_write.bits.data.coh := new_coh
     io.meta_write.bits.data.tag := req_tag
+    io.meta_write.bits.data.qosid := req.qosid
     io.meta_write.bits.data.stale := false.B //this is an acquire getting issued!
     io.meta_write.bits.way_en   := req.way_en
-    io.meta_write.bits.qosid    := req.qosid
     when (io.meta_write.fire) {
       printf(cf"@ clk_cycle ${clk_cycle}: L1 Request data sent to core! Address: 0x${req.addr(31, 0)}%x, Core: 0x${tileId}%x\n")
       state := s_mem_finish_1
