@@ -22,12 +22,14 @@ import boom.util.{IsKilledByBranch, GetNewBrMask, BranchKillableQueue, IsOlder, 
 
 
 abstract class DataPrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
+  with HasBoomCoreParameters
 {
   val io = IO(new Bundle {
     val mshr_avail = Input(Bool())
     val req_val    = Input(Bool())
     val req_addr   = Input(UInt(coreMaxAddrBits.W))
     val req_coh    = Input(new ClientMetadata)
+    val req_qosid  = Input(UInt(qosidBits.W))
 
     val prefetch   = Decoupled(new BoomDCacheReq)
   })
@@ -50,6 +52,7 @@ class NLPrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends DataPrefetch
   val req_valid = RegInit(false.B)
   val req_addr  = Reg(UInt(coreMaxAddrBits.W))
   val req_cmd   = Reg(UInt(M_SZ.W))
+  val req_qosid  = Reg(UInt(qosidBits.W))
 
   val mshr_req_addr = io.req_addr + cacheBlockBytes.U
   val cacheable = edge.manager.supportsAcquireBSafe(mshr_req_addr, lgCacheBlockBytes.U)
@@ -57,6 +60,7 @@ class NLPrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends DataPrefetch
     req_valid := true.B
     req_addr  := mshr_req_addr
     req_cmd   := Mux(ClientStates.hasWritePermission(io.req_coh.state), M_PFW, M_PFR)
+    req_qosid := io.req_qosid
   } .elsewhen (io.prefetch.fire) {
     req_valid := false.B
   }
@@ -67,4 +71,5 @@ class NLPrefetcher(implicit edge: TLEdgeOut, p: Parameters) extends DataPrefetch
   io.prefetch.bits.uop         := NullMicroOp
   io.prefetch.bits.uop.mem_cmd := req_cmd
   io.prefetch.bits.data        := DontCare
+  io.prefetch.bits.qosid       := req_qosid
 }

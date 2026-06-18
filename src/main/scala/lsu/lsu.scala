@@ -68,6 +68,7 @@ class BoomDCacheReq(implicit p: Parameters) extends BoomBundle()(p)
   val addr  = UInt(coreMaxAddrBits.W)
   val data  = Bits(coreDataBits.W)
   val is_hella = Bool() // Is this the hellacache req? If so this is not tracked in LDQ or STQ
+  val qosid = UInt(qosidBits.W)
 }
 
 class BoomDCacheResp(implicit p: Parameters) extends BoomBundle()(p)
@@ -107,6 +108,7 @@ class LSUDMemIO(implicit p: Parameters, edge: TLEdgeOut) extends BoomBundle()(p)
 }
 
 class LSUCoreIO(implicit p: Parameters) extends BoomBundle()(p)
+  with HasBoomCoreParameters
 {
   val exe = Vec(memWidth, new LSUExeIO)
 
@@ -153,6 +155,8 @@ class LSUCoreIO(implicit p: Parameters) extends BoomBundle()(p)
     val release = Bool()
     val tlbMiss = Bool()
   })
+
+  val qosid      = Input(UInt(qosidBits.W))
 }
 
 class LSUIO(implicit p: Parameters, edge: TLEdgeOut) extends BoomBundle()(p)
@@ -761,6 +765,7 @@ class LSU(implicit p: Parameters, edge: TLEdgeOut) extends BoomModule()(p)
     dmem_req(w).bits.addr  := 0.U
     dmem_req(w).bits.data  := 0.U
     dmem_req(w).bits.is_hella := false.B
+    dmem_req(w).bits.qosid := io.core.qosid
 
     io.dmem.s1_kill(w) := false.B
 
