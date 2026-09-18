@@ -801,9 +801,9 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   for (w <- 0 until memWidth)
     assert(!(s2_send_resp(w) && s2_send_nack(w)))
 
-  when (s2_hit(0) && s2_valid(0) && s2_type === t_lsu){ //{//on a completed cache hit from LSU
+  when (s2_hit(0) && s2_valid(0) && s2_type === t_lsu && !s2_nack(0)){ //{//on a completed cache hit from LSU
     replacer.update(valid=true.B, hit=true.B, set=s2_req(0).addr(untagBits-1,blockOffBits), hit_way=OHToUInt(s2_tag_match_way(0)(log2Ceil(cacheParams.nWays)-1, 0)))//we hit! (force width)
-  }.elsewhen (!s2_hit(0) && s2_valid(0) && s2_type === t_lsu){ //on a completed cache miss from LSU
+  }.elsewhen (!s2_hit(0) && s2_valid(0) && s2_type === t_lsu && !s2_nack(0)){ //on a completed cache miss from LSU
     replacer.update(valid=true.B, hit=false.B, set=s2_req(0).addr(untagBits-1,blockOffBits), hit_way=OHToUInt(s2_tag_match_way(0)(log2Ceil(cacheParams.nWays)-1, 0)))//we miss!
   }.otherwise{
     replacer.update(valid=false.B, hit=false.B, set=s2_req(0).addr(untagBits-1,blockOffBits), hit_way=OHToUInt(s2_tag_match_way(0)(log2Ceil(cacheParams.nWays)-1, 0)))//I should be able to init like this right?
