@@ -851,15 +851,15 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   // probe buffer to go around stalls
   // val probe_req_buffer = Module(new ListBuffer(ListBufferParameters(Flipped(Decoupled(new TLBundleB(edge.bundle))), cfg.nMSHRs + 1, 1, false)))
   val probe_req_buffer = RegInit(
-    VecInit(Seq.fill(cfg.nMSHRs + 1)(0.U.asTypeOf(new TLBundleB(edge.bundle))))
+    VecInit(Seq.fill(cfg.nCores)(0.U.asTypeOf(new TLBundleB(edge.bundle))))
   )
-  val probe_req_status_no_ages = Seq.fill(cfg.nMSHRs + 1)(0.U.asTypeOf(new ProbeStatusBundle(cfg.nMSHRs)))
+  val probe_req_status_no_ages = Seq.fill(cfg.nCores)(0.U.asTypeOf(new ProbeStatusBundle(cfg.nMSHRs)))
   val probe_req_status_ages = probe_req_status_no_ages.zipWithIndex.map{case (data, idx) =>
     data.age := idx.U
     data
   }
   val probe_req_status = RegInit(VecInit(probe_req_status_ages))
-  val probe_buf_next_idx = Wire(UInt(log2Ceil(cfg.nMSHRs + 1).W))
+  val probe_buf_next_idx = Wire(UInt(log2Ceil(cfg.nCores).W))
 
   val oldest_probe_idx: UInt = probe_req_status.zipWithIndex.map{case (data, idx) => 
     (data, idx.U)}.reduce { (a, b) => MuxT((a._1.age > b._1.age) && (a._1.valid), a, MuxT(b._1.valid, b, a))}._2 //get the oldest valid pending probe (equal ages are for initial state)
@@ -878,7 +878,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 
   when(!mshrs.io.probe_rdy){
     //set busy flag for offending probe
-    for (i <- 0 until (cfg.nMSHRs + 1)) {
+    for (i <- 0 until (cfg.nCores)) {
       when (probe_req_status(i).valid && probe_req_buffer(i).address === prober.io.state.bits){
         probe_req_status(i).blocked := true.B
       }
@@ -887,7 +887,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 
   when(mshrs.io.clear_mshr.valid){
     //clear busy flag for offending probe
-    for (i <- 0 until (cfg.nMSHRs + 1)) {
+    for (i <- 0 until (cfg.nCores)) {
       when (probe_req_status(i).valid && probe_req_buffer(i).address === mshrs.io.clear_mshr.bits){
         probe_req_status(i).blocked := false.B
       }
@@ -904,7 +904,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 
     probe_req_status(probe_buf_next_idx).valid := true.B
 
-    for(i <- 0 until (cfg.nMSHRs + 1)){ //set & increment LRU
+    for(i <- 0 until (cfg.nCores)){ //set & increment LRU
       probe_req_status(i).age := Mux(i.U === probe_buf_next_idx, 0.U, 
         Mux(probe_req_status(probe_buf_next_idx).age > probe_req_status(i).age, 
           probe_req_status(i).age + 1.U, probe_req_status(i).age))
