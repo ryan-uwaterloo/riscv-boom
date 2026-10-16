@@ -285,6 +285,8 @@ class BoomFrontendIO(implicit p: Parameters) extends BoomBundle
 
   val flush_icache = Output(Bool())
 
+  val qosid = Output(UInt(qosidBits.W))
+
   val perf = Input(new FrontendPerfEvents)
 }
 
@@ -335,6 +337,7 @@ class BoomFrontendModule(outer: BoomFrontend) extends LazyModuleImp(outer)
 
   val icache = outer.icache.module
   icache.io.invalidate := io.cpu.flush_icache
+  icache.io.qosid := io.cpu.qosid
   val tlb = Module(new TLB(true, log2Ceil(fetchBytes), TLBConfig(nTLBSets, nTLBWays)))
   io.ptw <> tlb.io.ptw
   io.cpu.perf.tlbMiss := io.ptw.req.fire

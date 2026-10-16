@@ -55,6 +55,8 @@ case class BoomCoreParams(
   numDCacheBanks: Int = 1,
   nPMPs: Int = 8,
   enableICacheDelay: Boolean = false,
+  rcidBits: Int = 4, // should be 0s, doing this for now
+  mcidBits: Int = 4,
 
   /* branch prediction */
   enableBranchPrediction: Boolean = true,
@@ -151,7 +153,26 @@ class BoomCustomCSRs(implicit p: Parameters) extends freechips.rocketchip.tile.C
   def disableOOO = getOrElse(chickenCSR, _.value(3), true.B)
   def marchid = CustomCSR.constant(CSRs.marchid, BigInt(2))
 
-  override def decls: Seq[CustomCSR] = super.decls :+ marchid
+  def srmcfgCSR = {
+    val srmcfgCSRId = 0x181 // kinda randomly selected couldnt find anything standard
+    val mask = BigInt(
+      0xFFF << 0 | // RCID
+      0xFFF << 16  // MCID
+    )
+    Some(CustomCSR(srmcfgCSRId, mask, Some(0)))
+  }
+  
+  def qosid: UInt = (rcidBits, mcidBits) match {
+    case (0, 0) => 0.U
+    case (rb, 0) => getOrElse(srmcfgCSR, _.value(rb-1, 0), 0.U(qosidBits.W))
+    case (0, mb) => getOrElse(srmcfgCSR, _.value((mb-1)+16, 16), 0.U(qosidBits.W))
+    case (rb, mb) =>
+      getOrElse(srmcfgCSR,
+                csr => Cat(csr.value(rb-1, 0), csr.value((mb-1)+16, 16)),
+                0.U(qosidBits.W))
+  }
+
+  override def decls: Seq[CustomCSR] = super.decls :+ marchid :+ srmcfgCSR.get
 }
 
 /**
@@ -265,6 +286,9 @@ trait HasBoomCoreParameters extends freechips.rocketchip.tile.HasCoreParameters
   val enableSFBOpt = boomParams.enableSFBOpt
   val enableGHistStallRepair = boomParams.enableGHistStallRepair
   val enableBTBFastRepair = boomParams.enableBTBFastRepair
+  val rcidBits = boomParams.rcidBits
+  val mcidBits = boomParams.mcidBits
+  val qosidBits = rcidBits + mcidBits
 
   //************************************
   // Implicitly calculated constants
@@ -304,3 +328,19 @@ trait HasBoomCoreParameters extends freechips.rocketchip.tile.HasCoreParameters
   val corePAddrBits = paddrBits
   val corePgIdxBits = pgIdxBits
 }
+
+class QOSIDBundle(val rcidBits: Int, val mcidBits: Int) extends Bundle {
+  val rcid = UInt(rcidBits.W)
+  val mcid = UInt(mcidBits.W)
+}
+
+case object QOSIDKey extends ControlKey[QOSIDBundle]("qosid")
+
+case class QOSIDField(rcidBits: Int, mcidBits: Int) extends BundleField[QOSIDBundle](
+  QOSIDKey,
+  Output(new QOSIDBundle(rcidBits, mcidBits)),
+  (x: QOSIDBundle) => {
+    x.rcid := 0.U
+    x.mcid := 0.U
+  }
+)

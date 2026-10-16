@@ -79,6 +79,16 @@ class WithRationalBoomTiles extends Config((site, here, up) => {
   }
 })
 
+class WithQOSID(rcidBits: Int = 4, mcidBits: Int = 4) extends Config((site, here, up) => {
+  case TilesLocated(InSubsystem) => up(TilesLocated(InSubsystem), site) map {
+    case tp: BoomTileAttachParams => tp.copy(tileParams = tp.tileParams.copy(core = tp.tileParams.core.copy(
+      rcidBits = rcidBits,
+      mcidBits = mcidBits
+    )))
+    case other => other
+  }
+})
+
 /**
  * 1-wide BOOM.
  */

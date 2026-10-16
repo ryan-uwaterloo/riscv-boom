@@ -21,10 +21,18 @@ import boom.exu.BrUpdateInfo
 import boom.util.{IsKilledByBranch, GetNewBrMask, BranchKillableQueue, IsOlder, UpdateBrMask, AgePriorityEncoder, WrapInc, Transpose}
 
 
-class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCacheModule()(p) {
+class BoomWritebackReq(params: TLBundleParameters)(implicit p: Parameters) extends WritebackReq(params)(p) 
+  with HasBoomCoreParameters
+{
+  val qosid = UInt(qosidBits.W)
+}
+
+class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCacheModule()(p) 
+  with HasBoomCoreParameters
+{
   val io = IO(new Bundle {
-    val req = Flipped(Decoupled(new WritebackReq(edge.bundle)))
-    val meta_read = Decoupled(new L1MetaReadReq)
+    val req = Flipped(Decoupled(new BoomWritebackReq(edge.bundle)))
+    val meta_read = Decoupled(new BoomInternalL1MetaReadReq)
     val resp = Output(Bool())
     val idx = Output(Valid(UInt()))
     val data_req = Decoupled(new L1DataReadReq)
@@ -34,11 +42,11 @@ class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1Hella
     val lsu_release = Decoupled(new TLBundleC(edge.bundle))
   })
 
-  // clock cycle counter
+    // clock cycle counter
     val clk_cycle = RegInit(0.U(32.W))
     clk_cycle := clk_cycle + 1.U
 
-  val req = Reg(new WritebackReq(edge.bundle))
+  val req = Reg(new BoomWritebackReq(edge.bundle))
   val s_invalid :: s_fill_buffer :: s_lsu_release :: s_active :: s_grant :: s_release :: Nil = Enum(6)//add release state
   val state = RegInit(s_invalid)
   val r1_data_req_fired = RegInit(false.B)
@@ -126,12 +134,20 @@ class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1Hella
   } .elsewhen (state === s_lsu_release) {
     io.lsu_release.valid := true.B
     io.lsu_release.bits := probeResponse//because we only care about the addr, don't bother muxing message types.
+    io.lsu_release.bits.user.lift(QOSIDKey).foreach { q => // also unneeded lsu_release
+      q.rcid := req.qosid(qosidBits-1, mcidBits)
+      q.mcid := req.qosid(mcidBits-1, 0)
+    }
     when (io.lsu_release.fire) {
      state := s_active
     }
   } .elsewhen (state === s_active) {
     io.release.valid := data_req_cnt < refillCycles.U
     io.release.bits := Mux(req.voluntary, Mux(req.has_data, voluntaryRelease, voluntaryReleaseNoData), probeResponse) //if it has no data...
+    io.release.bits.user.lift(QOSIDKey).foreach { q =>
+      q.rcid := req.qosid(qosidBits-1, mcidBits)
+      q.mcid := req.qosid(mcidBits-1, 0)
+    }
     io.resp := Mux(req.has_data && req.voluntary, false.B, true.B)
 
     // when (io.mem_grant) {
@@ -156,6 +172,10 @@ class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1Hella
   } .elsewhen (state === s_release) {
     io.lsu_release.valid := true.B
     io.lsu_release.bits := probeResponse
+    io.lsu_release.bits.user.lift(QOSIDKey).foreach { q => // Also unneeded lsu_release
+      q.rcid := req.qosid(qosidBits-1, mcidBits)
+      q.mcid := req.qosid(mcidBits-1, 0)
+    }
     when (io.lsu_release.fire) {
      state := s_active
      io.resp := true.B //respond to releases when they are allowed to play!
@@ -169,18 +189,21 @@ class ProbeStatusBundle(nMSHRs: Int)(implicit p: Parameters) extends BoomBundle(
   val blocked = Bool()
 }
 
-class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCacheModule()(p) {
+class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCacheModule()(p) 
+  with HasBoomCoreParameters
+{
   val io = IO(new Bundle {
     val req = Flipped(Decoupled(new TLBundleB(edge.bundle)))
     val rep = Decoupled(new TLBundleC(edge.bundle))
-    val meta_read = Decoupled(new L1MetaReadReq)
-    val meta_write = Decoupled(new L1MetaWriteReq)
-    val wb_req = Decoupled(new WritebackReq(edge.bundle))
+    val meta_read = Decoupled(new BoomInternalL1MetaReadReq)
+    val meta_write = Decoupled(new BoomL1MetaWriteReq)
+    val wb_req = Decoupled(new BoomWritebackReq(edge.bundle))
     val way_en = Input(UInt(nWays.W))
     val wb_rdy = Input(Bool()) // Is writeback unit currently busy? If so need to retry meta read when its done
     val mshr_rdy = Input(Bool()) // Is MSHR ready for this request to proceed?
     val mshr_wb_rdy = Output(Bool()) // Should we block MSHR writebacks while we finish our own?
     val block_state = Input(new ClientMetadata())
+    val block_qosid = Input(UInt(qosidBits.W))
     val lsu_release = Decoupled(new TLBundleC(edge.bundle))
 
     val state = Output(Valid(UInt(coreMaxAddrBits.W)))
@@ -210,6 +233,7 @@ class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
   val miss_coh = ClientMetadata.onReset
   val reply_coh = Mux(tag_matches, old_coh, miss_coh)
   val (is_dirty, report_param, new_coh) = reply_coh.onProbe(req.param)
+  val old_qosid = Reg(UInt(qosidBits.W))
 
   io.state.valid := state =/= s_invalid
   io.state.bits  := req.address
@@ -217,6 +241,10 @@ class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
   io.req.ready := state === s_invalid
   io.rep.valid := state === s_release
   io.rep.bits := edge.ProbeAck(req, report_param)
+  io.rep.bits.user.lift(QOSIDKey).foreach { q =>
+    q.rcid := old_qosid(qosidBits-1, mcidBits)
+    q.mcid := old_qosid(mcidBits-1, 0)
+  }
 
   assert(!io.rep.valid || !edge.hasData(io.rep.bits),
     "ProbeUnit should not send ProbeAcks with data, WritebackUnit should handle it")
@@ -225,12 +253,15 @@ class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
   io.meta_read.bits.idx := req_idx
   io.meta_read.bits.tag := req_tag
   io.meta_read.bits.way_en := ~(0.U(nWays.W))
+  io.meta_read.bits.qosid := old_qosid // qosid is not used for when checking if probe hits
 
   io.meta_write.valid := state === s_meta_write
   io.meta_write.bits.way_en := way_en
   io.meta_write.bits.idx := req_idx
   io.meta_write.bits.tag := req_tag
+  io.meta_write.bits.qosid := old_qosid // unused in the meta_write path but just following the pattern since tag does the same and also unused it seems
   io.meta_write.bits.data.tag := req_tag
+  io.meta_write.bits.data.qosid := old_qosid
   io.meta_write.bits.data.coh := new_coh
   io.meta_write.bits.data.stale := new_coh === 0.U // if probed to invalid, mark as stale.
 
@@ -238,6 +269,7 @@ class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
   io.wb_req.bits.source := req.source
   io.wb_req.bits.idx := req_idx
   io.wb_req.bits.tag := req_tag
+  io.wb_req.bits.qosid := old_qosid
   io.wb_req.bits.param := report_param
   io.wb_req.bits.way_en := way_en
   io.wb_req.bits.voluntary := false.B
@@ -248,6 +280,10 @@ class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
 
   io.lsu_release.valid := state === s_lsu_release
   io.lsu_release.bits  := edge.ProbeAck(req, report_param)
+  io.lsu_release.bits.user.lift(QOSIDKey).foreach { q => // I think unneeded for all lsu_release but maybe confirm
+    q.rcid := old_qosid(qosidBits-1, mcidBits)
+    q.mcid := old_qosid(mcidBits-1, 0)
+  }
 
   io.probe_commit.valid := false.B 
   io.probe_commit.bits  := DontCare
@@ -270,6 +306,7 @@ class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
   } .elsewhen (state === s_mshr_req) {
     old_coh := io.block_state
     way_en := io.way_en
+    old_qosid := io.block_qosid
     // if the read didn't go through, we need to retry
     state := Mux(io.mshr_rdy, Mux(io.wb_rdy, s_mshr_resp, s_meta_read), s_invalid)
     when (!io.mshr_rdy && !io.wb_rdy) {
@@ -313,8 +350,67 @@ class BoomProbeUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1HellaCach
   }
 }
 
+class BoomL1Metadata(implicit p: Parameters) extends L1Metadata()(p) 
+  with HasBoomCoreParameters
+{
+  val qosid = UInt(qosidBits.W)
+}
+
+object BoomL1Metadata {
+  def apply(tag: Bits, coh: ClientMetadata, stale: Bool, qosid: Bits)(implicit p: Parameters) = {
+    val meta = Wire(new BoomL1Metadata)
+    meta.tag := tag
+    meta.coh := coh
+    meta.stale := false.B //add state init
+    meta.qosid := qosid // ^is above supposed to be := stale?
+    meta
+  }
+}
+
+class BoomInternalL1MetaReadReq(implicit p: Parameters) extends L1HellaCacheBundle()(p) 
+  with HasBoomCoreParameters
+{
+  val idx    = UInt(idxBits.W)
+  val way_en = UInt(nWays.W)
+  val tag    = UInt(tagBits.W)
+  val qosid  = UInt(qosidBits.W)
+}
+
+class BoomL1MetaWriteReq(implicit p: Parameters) extends BoomInternalL1MetaReadReq()(p) {
+  val data = new BoomL1Metadata
+}
+
 class BoomL1MetaReadReq(implicit p: Parameters) extends BoomBundle()(p) {
-  val req = Vec(memWidth, new L1MetaReadReq)
+  val req = Vec(memWidth, new BoomInternalL1MetaReadReq)
+}
+
+// Copied from L1MetadataArray but since I changed the io for it directly, couldn't just extend it
+class BoomL1MetadataArray[T <: BoomL1Metadata](onReset: () => T)(implicit p: Parameters) extends L1HellaCacheModule()(p) {
+  val rstVal = onReset()
+  val io = IO(new Bundle {
+    val read = Flipped(Decoupled(new BoomInternalL1MetaReadReq))
+    val write = Flipped(Decoupled(new BoomL1MetaWriteReq))
+    val resp = Output(Vec(nWays, rstVal.cloneType))
+  })
+
+  val rst_cnt = RegInit(0.U(log2Up(nSets+1).W))
+  val rst = rst_cnt < nSets.U
+  val waddr = Mux(rst, rst_cnt, io.write.bits.idx)
+  val wdata = Mux(rst, rstVal, io.write.bits.data).asUInt
+  val wmask = Mux(rst || (nWays == 1).B, (-1).S, io.write.bits.way_en.asSInt).asBools
+  val rmask = Mux(rst || (nWays == 1).B, (-1).S, io.read.bits.way_en.asSInt).asBools
+  when (rst) { rst_cnt := rst_cnt+1.U }
+
+  val metabits = rstVal.getWidth
+  val tag_array = SyncReadMem(nSets, Vec(nWays, UInt(metabits.W)))
+  val wen = rst || io.write.valid
+  when (wen) {
+    tag_array.write(waddr, VecInit.fill(nWays)(wdata), wmask)
+  }
+  io.resp := tag_array.read(io.read.bits.idx, io.read.fire).map(_.asTypeOf(chiselTypeOf(rstVal)))
+
+  io.read.ready := !wen // so really this could be a 6T RAM
+  io.write.ready := !rst
 }
 
 class BoomL1DataReadReq(implicit p: Parameters) extends BoomBundle()(p) {
@@ -449,9 +545,12 @@ class BoomNonBlockingDCache(staticIdForMetadataUseOnly: Int)(implicit p: Paramet
     sourceId      = IdRange(cfg.nMSHRs + 1, cfg.nMSHRs + 1 + cfg.nMMIOs),
     requestFifo   = true))
 
+  private val boomCore = tileParams.core.asInstanceOf[BoomCoreParams]
+
   val node = TLClientNode(Seq(TLMasterPortParameters.v1(
     cacheClientParameters ++ mmioClientParameters,
-    minLatency = 1)))
+    minLatency = 1,
+    requestFields = Seq(QOSIDField(boomCore.rcidBits, boomCore.mcidBits)))))
 
 
   lazy val module = new BoomNonBlockingDCacheModule(this)
@@ -460,7 +559,6 @@ class BoomNonBlockingDCache(staticIdForMetadataUseOnly: Int)(implicit p: Paramet
 
   require(!tileParams.core.haveCFlush || cfg.scratch.isEmpty, "CFLUSH_D_L1 instruction requires a D$")
 }
-
 
 class BoomDCacheBundle(implicit p: Parameters, edge: TLEdgeOut) extends BoomBundle()(p) {
   val lsu   = Flipped(new LSUDMemIO)
@@ -494,9 +592,9 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   mshrs.io.rob_head_idx := io.lsu.rob_head_idx
 
   // tags
-  def onReset = L1Metadata(0.U, ClientMetadata.onReset, false.B)
-  val meta = Seq.fill(memWidth) { Module(new L1MetadataArray(onReset _)) }
-  val metaWriteArb = Module(new Arbiter(new L1MetaWriteReq, 2))
+  def onReset = BoomL1Metadata(0.U, ClientMetadata.onReset, false.B, 0.U)
+  val meta = Seq.fill(memWidth) { Module(new BoomL1MetadataArray(onReset _)) }
+  val metaWriteArb = Module(new Arbiter(new BoomL1MetaWriteReq, 2))
   // 0 goes to MSHR refills, 1 goes to prober
   val metaReadArb = Module(new Arbiter(new BoomL1MetaReadReq, 6))
   // 0 goes to MSHR replays, 1 goes to prober, 2 goes to wb, 3 goes to MSHR meta read,
@@ -555,6 +653,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   replay_req(0).addr       := mshrs.io.replay.bits.addr
   replay_req(0).data       := mshrs.io.replay.bits.data
   replay_req(0).is_hella   := mshrs.io.replay.bits.is_hella
+  replay_req(0).qosid      := mshrs.io.replay.bits.qosid
   mshrs.io.replay.ready    := metaReadArb.io.in(0).ready && dataReadArb.io.in(0).ready
   // Tag read for MSHR replays
   // We don't actually need to read the metadata, for replays we already know our way
@@ -576,6 +675,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   mshr_read_req(0).addr     := Cat(mshrs.io.meta_read.bits.tag, mshrs.io.meta_read.bits.idx) << blockOffBits
   mshr_read_req(0).data     := DontCare
   mshr_read_req(0).is_hella := false.B
+  mshr_read_req(0).qosid    := mshrs.io.meta_read.bits.qosid
   metaReadArb.io.in(3).valid       := mshrs.io.meta_read.valid
   metaReadArb.io.in(3).bits.req(0) := mshrs.io.meta_read.bits
   mshrs.io.meta_read.ready         := metaReadArb.io.in(3).ready
@@ -591,6 +691,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   wb_req(0).addr     := Cat(wb.io.meta_read.bits.tag, wb.io.data_req.bits.addr)
   wb_req(0).data     := DontCare
   wb_req(0).is_hella := false.B
+  wb_req(0).qosid    := wb.io.req.bits.qosid // unsure ???
   // Couple the two decoupled interfaces of the WBUnit's meta_read and data_read
   // Tag read for write-back
   metaReadArb.io.in(2).valid        := wb.io.meta_read.valid
@@ -612,6 +713,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   prober_req(0).addr     := Cat(prober.io.meta_read.bits.tag, prober.io.meta_read.bits.idx) << blockOffBits
   prober_req(0).data     := DontCare
   prober_req(0).is_hella := false.B
+  prober_req(0).qosid    := prober.io.meta_read.bits.qosid
   // Tag read for prober
   metaReadArb.io.in(1).valid       := prober.io.meta_read.valid
   metaReadArb.io.in(1).bits.req(0) := prober.io.meta_read.bits
@@ -629,6 +731,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   metaReadArb.io.in(5).bits.req(0).idx    := mshrs.io.prefetch.bits.addr >> blockOffBits
   metaReadArb.io.in(5).bits.req(0).way_en := DontCare
   metaReadArb.io.in(5).bits.req(0).tag    := DontCare
+  metaReadArb.io.in(5).bits.req(0).qosid  := mshrs.io.prefetch.bits.qosid
   mshrs.io.prefetch.ready := metaReadArb.io.in(5).ready
   // Prefetch does not need to read data array
 
@@ -677,11 +780,15 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   // tag check
   def wayMap[T <: Data](f: Int => T) = VecInit((0 until nWays).map(f))
   val s1_tag_eq_way = widthMap(i => wayMap((w: Int) => meta(i).io.resp(w).tag === (s1_addr(i) >> untagBits)).asUInt)
+  val s1_addr_match_way = widthMap(i => wayMap((w: Int) => s1_tag_eq_way(i)(w) && (meta(i).io.resp(w).coh.isValid() || meta(i).io.resp(w).stale)).asUInt)
+  val s1_qosid_match_way = widthMap(i => wayMap((w: Int) => (meta(i).io.resp(w).coh.isValid() || meta(i).io.resp(w).stale) && (meta(i).io.resp(w).qosid === s1_req(i).qosid)).asUInt) // confirm that checking for stale here is actually a good idea, I can't think of why it wouldn't be
+  // if i get rid of the check here, maybe possible to allow a different handling of qosid miss while address hit (currently it just misses unless probing)
   val s1_tag_match_way = widthMap(i =>
                          Mux(s1_type === t_replay, s1_replay_way_en,
                          Mux(s1_type === t_wb,     s1_wb_way_en,
                          Mux(s1_type === t_mshr_meta_read, s1_mshr_meta_read_way_en,
-                           wayMap((w: Int) => s1_tag_eq_way(i)(w) && (meta(i).io.resp(w).coh.isValid() || meta(i).io.resp(w).stale)).asUInt))))
+                         Mux(s1_type === t_probe, s1_addr_match_way(i),
+                           s1_addr_match_way(i) & s1_qosid_match_way(i))))))
 
   val s1_wb_idx_matches = widthMap(i => (s1_addr(i)(untagBits-1,blockOffBits) === wb.io.idx.bits) && wb.io.idx.valid)
 
@@ -697,6 +804,8 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     s2_req(w).uop.br_mask := GetNewBrMask(io.lsu.brupdate, s1_req(w).uop)
 
   val s2_tag_match_way = RegNext(s1_tag_match_way)
+  val s2_addr_match_way = RegNext(s1_addr_match_way)
+  val s2_qosid_match_way = RegNext(s1_qosid_match_way)
   val s2_tag_match     = s2_tag_match_way.map(_.orR)
   val s2_hit_state     = widthMap(i => Mux1H(s2_tag_match_way(i), wayMap((w: Int) => RegNext(meta(i).io.resp(w).coh))))
   val s2_has_permission = widthMap(w => s2_hit_state(w).onAccess(s2_req(w).uop.mem_cmd)._1)
@@ -773,7 +882,10 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   //val s1_replaced_way_en = UIntToOH(replacer.way) we need to access in s1, read out in s2!
   //when(s1_valid(0)){ //this has a 1cycle delay.
   replacer.access(s1_req(0).addr(untagBits-1,blockOffBits)) //I hate this addressing. Sets up replacement set as read address
-  val s2_replaced_way_en = UIntToOH(replacer.way) //get victim for set in s2
+  
+  val s2_stale_qosid_hit_way = widthMap(w => (s2_addr_match_way(w) & ~s2_qosid_match_way(w)).asUInt)
+  val s2_stale_qosid_hit = widthMap(w => s2_stale_qosid_hit_way(w).orR)
+  val s2_replaced_way_en = widthMap(w => Mux(s2_stale_qosid_hit(w), UIntToOH(PriorityEncoder(s2_stale_qosid_hit_way(w))), UIntToOH(replacer.way))) //get victim for set in s2, idk if this breaks something inside replacer though...
   dontTouch(s2_replaced_way_en) //help me debug ;w;
   val dbg_target_set = s1_req(0).addr(untagBits-1,blockOffBits)//debug signal
   dontTouch(dbg_target_set) // :)
@@ -781,7 +893,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   dontTouch(dbg_plru_state)
 
 
-  val s2_repl_meta = widthMap(i => Mux1H(s2_replaced_way_en, wayMap((w: Int) => RegNext(meta(i).io.resp(w))).toSeq))
+  val s2_repl_meta = widthMap(i => Mux1H(s2_replaced_way_en(i), wayMap((w: Int) => RegNext(meta(i).io.resp(w))).toSeq))
 
   // nack because of incoming probe
   val s2_nack_hit    = RegNext(VecInit(s1_nack))
@@ -835,8 +947,9 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
     mshrs.io.req(w).bits.uop.br_mask := GetNewBrMask(io.lsu.brupdate, s2_req(w).uop)
     mshrs.io.req(w).bits.addr        := s2_req(w).addr
     mshrs.io.req(w).bits.tag_match   := s2_tag_match(w)
-    mshrs.io.req(w).bits.old_meta    := Mux(s2_tag_match(w), L1Metadata(s2_repl_meta(w).tag, s2_hit_state(w), s2_repl_meta(w).stale), s2_repl_meta(w))
-    mshrs.io.req(w).bits.way_en      := Mux(s2_tag_match(w), s2_tag_match_way(w), s2_replaced_way_en)
+    mshrs.io.req(w).bits.qosid       := s2_req(w).qosid
+    mshrs.io.req(w).bits.old_meta    := Mux(s2_tag_match(w), BoomL1Metadata(s2_repl_meta(w).tag, s2_hit_state(w), s2_repl_meta(w).stale, s2_repl_meta(w).qosid), s2_repl_meta(w))
+    mshrs.io.req(w).bits.way_en      := Mux(s2_tag_match(w), s2_tag_match_way(w), s2_replaced_way_en(w))
 
     mshrs.io.req(w).bits.data        := s2_req(w).data
     mshrs.io.req(w).bits.is_hella    := s2_req(w).is_hella
@@ -918,6 +1031,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
 
   prober.io.way_en      := s2_tag_match_way(0)
   prober.io.block_state := s2_hit_state(0)
+  prober.io.block_qosid := Mux1H(s2_addr_match_way(0), wayMap((w: Int) => RegNext(meta(0).io.resp(w).qosid)))
   metaWriteArb.io.in(1) <> prober.io.meta_write
   prober.io.mshr_rdy    := mshrs.io.probe_rdy
   prober.io.wb_rdy      := (prober.io.meta_write.bits.idx =/= wb.io.idx.bits) || !wb.io.idx.valid
@@ -940,7 +1054,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   tl_out.e <> mshrs.io.mem_finish
 
   // writebacks
-  val wbArb = Module(new RRArbiter(new WritebackReq(edge.bundle), 2)) //prober > mshr -> this is okay, I think, maybe
+  val wbArb = Module(new RRArbiter(new BoomWritebackReq(edge.bundle), 2)) //prober > mshr -> this is okay, I think, maybe
   // 0 goes to prober, 1 goes to MSHR evictions
   wbArb.io.in(0)       <> prober.io.wb_req
   wbArb.io.in(1)       <> mshrs.io.wb_req
