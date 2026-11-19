@@ -93,6 +93,7 @@ class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1Hella
       state := Mux(io.req.bits.has_data, s_fill_buffer, s_release) //mux in a fill bypass for non-data acks.
       data_req_cnt := Mux(io.req.bits.has_data, 0.U, (refillCycles-1).U) //if no data, play for 1 beat only
       req := io.req.bits
+      printf(cf"@ clk_cycle ${clk_cycle}: L1 Release In RelU! Address: 0x${Cat(io.req.bits.tag, io.req.bits.idx) << blockOffBits}%x, Core: 0x${tileId}%x\n")
       // acked := false.B
     }
   } .elsewhen (state === s_fill_buffer) {
