@@ -89,6 +89,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
 
     // Writeback unit tells us when it is done processing our wb
     val wb_resp     = Input(Bool())
+    val wb_sent     = Input(Bool())
 
     val probe_rdy   = Output(Bool())
 
@@ -109,7 +110,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     val clk_cycle = RegInit(0.U(32.W))
     clk_cycle := clk_cycle + 1.U
 
-  val s_invalid :: s_refill_req :: s_refill_resp :: s_drain_rpq_loads :: s_meta_read :: s_meta_resp_1 :: s_meta_resp_2 :: s_meta_clear :: s_wb_meta_read :: s_wb_req :: s_wb_resp :: s_commit_line :: s_drain_rpq :: s_meta_write_req :: s_mem_finish_1 :: s_mem_finish_2 :: s_prefetched :: s_prefetch :: Nil = Enum(18)
+  val s_invalid :: s_refill_req :: s_refill_resp :: s_drain_rpq_loads :: s_meta_read :: s_meta_resp_1 :: s_meta_resp_2 :: s_meta_clear :: s_wb_meta_read :: s_wb_req :: s_wb_resp :: s_commit_line :: s_drain_rpq :: s_meta_write_req :: s_mem_finish_1 :: s_mem_finish_2 :: s_prefetched :: s_prefetch :: s_wb_sent :: Nil = Enum(19)
   val state = RegInit(s_invalid)
 
   val req     = Reg(new BoomDCacheReqInternal)
@@ -197,7 +198,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     }
   }
 
-  when (io.wb_resp) {
+  when (io.wb_resp && state =/= s_wb_sent) {
     wb_acked := true.B
   }
 
@@ -336,9 +337,7 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     }
   } .elsewhen (state === s_wb_req) {
     wb_acked := false.B
-
     io.wb_req.valid          := true.B
-
     io.wb_req.bits.tag       := req.old_meta.tag
     io.wb_req.bits.idx       := req_idx
     io.wb_req.bits.param     := shrink_param
@@ -347,6 +346,10 @@ class BoomMSHR(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()(p)
     io.wb_req.bits.voluntary := true.B
     io.wb_req.bits.has_data  := wb_has_data
     when (io.wb_req.fire) {
+      state := Mux(wb_has_data, s_wb_sent, s_commit_line)
+    }
+  }.elsewhen (state === s_wb_sent) {
+    when (io.wb_sent) {
       state := s_commit_line
     }
   } .elsewhen (state === s_wb_resp) {
@@ -571,6 +574,7 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
 
     val wb_resp   = Input(Bool())
     val wb_resp_src = Input(UInt(log2Ceil(cfg.nMSHRs).W))
+    val wb_sent   = Input(Bool())
 
     val fence_rdy = Output(Bool())
     val probe_rdy = Output(Bool())
@@ -697,6 +701,7 @@ class BoomMSHRFile(implicit edge: TLEdgeOut, p: Parameters) extends BoomModule()
     mshr.io.prober_state := io.prober_state
 
     mshr.io.wb_resp      := io.wb_resp & (io.wb_resp_src === i.U(log2Ceil(cfg.nMSHRs).W))
+    mshr.io.wb_sent      := io.wb_sent
 
     meta_write_arb.io.in(i) <> mshr.io.meta_write
     meta_read_arb.io.in(i)  <> mshr.io.meta_read

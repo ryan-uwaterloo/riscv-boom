@@ -133,7 +133,7 @@ class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1Hella
   } .elsewhen (state === s_active) {
     io.release.valid := data_req_cnt < refillCycles.U
     io.release.bits := Mux(req.voluntary, Mux(req.has_data, voluntaryRelease, voluntaryReleaseNoData), probeResponse) //if it has no data...
-    io.resp := Mux(req.has_data && req.voluntary, false.B, true.B)
+    // io.resp := Mux(req.has_data && req.voluntary, false.B, true.B)
 
     // when (io.mem_grant) {
     //   acked := true.B
@@ -147,19 +147,12 @@ class BoomWritebackUnit(implicit edge: TLEdgeOut, p: Parameters) extends L1Hella
         printf(cf"@ clk_cycle ${clk_cycle}: L1 Release Complete! Address: 0x${Cat(req.tag, req.idx) << blockOffBits}%x, Core: 0x${tileId}%x\n")
       }
     }
-  // } .elsewhen (state === s_grant) {
-    // when (io.mem_grant) {
-    //   acked := true.B
-    // }
-    // when (acked) {
-    //   state := s_invalid
-    // }
   } .elsewhen (state === s_release) {
     io.lsu_release.valid := true.B
     io.lsu_release.bits := probeResponse
     when (io.lsu_release.fire) {
      state := s_active
-     io.resp := true.B //respond to releases when they are allowed to play!
+    //  io.resp := true.B //respond to releases when they are allowed to play!
     }
   }
 }
@@ -947,6 +940,7 @@ class BoomNonBlockingDCacheModule(outer: BoomNonBlockingDCache) extends LazyModu
   wbArb.io.in(1)       <> mshrs.io.wb_req
   wb.io.req            <> wbArb.io.out
   wb.io.data_resp       := s2_data_muxed(0)
+  mshrs.io.wb_sent      := wb.io.resp
   mshrs.io.wb_resp      := tl_out.d.fire && tl_out.d.bits.opcode === 6.U //ReleaseData
   mshrs.io.wb_resp_src  := tl_out.d.bits.source
   wb.io.mem_grant       := tl_out.d.fire && tl_out.d.bits.source === cfg.nMSHRs.U
